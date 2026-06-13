@@ -45,10 +45,10 @@ async def test_general_chat_no_docs(client):
 @pytest.mark.asyncio
 async def test_history_pagination(client):
     token = await _register_and_login(client)
-    for _ in range(3):
+    for i in range(3):
         await client.post(
             "/api/chat/ask",
-            json={"question": "1+1等于几？"},
+            json={"question": f"第 {i} 个独立问题 {i}"},
             headers=_auth(token),
         )
 
@@ -58,6 +58,17 @@ async def test_history_pagination(client):
     assert len(data["messages"]) == 2
     assert data["has_next"] is True
     assert data["next_cursor"] is not None
+
+
+@pytest.mark.asyncio
+async def test_cache_hit_on_same_question(client):
+    """相同问题第二次命中缓存，响应里 cache=hit。"""
+    token = await _register_and_login(client)
+    q = "独立问题_cache_test_xyz"
+    await client.post("/api/chat/ask", json={"question": q}, headers=_auth(token))
+    resp2 = await client.post("/api/chat/ask", json={"question": q}, headers=_auth(token))
+    assert resp2.status_code == 200
+    assert "cache" in resp2.text
 
 
 @pytest.mark.asyncio

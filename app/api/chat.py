@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -6,8 +7,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.core.cache import (
+    acquire_lock,
+    get_cached_answer,
+    release_lock,
+    set_cached_answer,
+)
 from app.core.database import async_session_factory, get_db
 from app.core.exceptions import BizError
+from app.core.rate_limit import limiter
 from app.core.response import ResponseCode, success_response
 from app.models import Conversation, Message, User
 from app.schemas.chat import ChatAskRequest, ChatHistoryData, MessageOut, SourceItem
@@ -16,7 +24,20 @@ from app.services.chat_service import sse, stream_graph
 router = APIRouter()
 
 
+def _stream_cached(cached: dict, cache_tag: str):
+    async def gen():
+        if cached.get("sources"):
+            yield sse("sources", cached["sources"])
+        if cached.get("answer"):
+            for i in range(0, len(cached["answer"]), 4):
+                yield sse("token", cached["answer"][i : i + 4])
+        yield sse("done", {"status": "ok", "cache": cache_tag})
+
+    return gen()
+
+
 @router.post("/ask")
+@limiter.limit("100/minute")
 async def ask(
     request: Request,
     body: ChatAskRequest,
@@ -29,44 +50,102 @@ async def ask(
 
     user_id = user.id
 
+    hit, cached = await get_cached_answer(user_id, question)
+    if hit and cached and cached.get("answer"):
+        return StreamingResponse(
+            _stream_cached(cached, "hit"),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    lock_token: str | None = await acquire_lock(user_id, question)
+
+    if lock_token is None:
+        for _ in range(8):
+            await asyncio.sleep(0.3)
+            hit2, cached2 = await get_cached_answer(user_id, question)
+            if hit2 and cached2 and cached2.get("answer"):
+                return StreamingResponse(
+                    _stream_cached(cached2, "wait"),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                )
+        lock_token = await acquire_lock(user_id, question)
+        if lock_token is None:
+            lock_token = "no-redis"
+
     async def event_stream():
         answer_parts: list[str] = []
         sources: list[dict] = []
         error_msg: str | None = None
 
-        async for event_name, payload in stream_graph(graph, user_id, question):
-            yield sse(event_name, payload)
-            if event_name == "token":
-                answer_parts.append(payload)
-            elif event_name == "sources":
-                sources = payload
-            elif event_name == "error":
-                error_msg = payload.get("message", "未知错误")
-
-        if error_msg is None and answer_parts:
-            answer = "".join(answer_parts)
-            async with async_session_factory() as db:
-                conv = Conversation(user_id=user_id, title=question[:50])
-                db.add(conv)
-                await db.flush()
-                conv_id = conv.id
-
-                db.add(Message(conversation_id=conv_id, role="user", content=question, sources=None))
-                db.add(
-                    Message(
-                        conversation_id=conv_id,
-                        role="assistant",
-                        content=answer,
-                        sources=json.dumps(sources, ensure_ascii=False) if sources else None,
-                    )
+        try:
+            async for event_name, payload in stream_graph(graph, user_id, question):
+                yield sse(event_name, payload)
+                if event_name == "token":
+                    answer_parts.append(payload)
+                elif event_name == "sources":
+                    sources = payload
+                elif event_name == "error":
+                    error_msg = payload.get("message", "未知错误")
+        except asyncio.CancelledError:
+            raise
+        finally:
+            await asyncio.shield(
+                _finalize(
+                    user_id=user_id,
+                    question=question,
+                    answer_parts=answer_parts,
+                    sources=sources,
+                    error_msg=error_msg,
+                    lock_token=lock_token,
                 )
-                await db.commit()
+            )
 
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+async def _finalize(
+    user_id: int,
+    question: str,
+    answer_parts: list[str],
+    sources: list[dict],
+    error_msg: str | None,
+    lock_token: str | None,
+) -> None:
+    answer = "".join(answer_parts)
+    if lock_token:
+        await release_lock(user_id, question, lock_token)
+    if error_msg or not answer:
+        return
+    try:
+        await set_cached_answer(user_id, question, answer, sources)
+    except Exception:
+        pass
+    try:
+        async with async_session_factory() as db:
+            conv = Conversation(user_id=user_id, title=question[:50])
+            db.add(conv)
+            await db.flush()
+            conv_id = conv.id
+            db.add(
+                Message(conversation_id=conv_id, role="user", content=question, sources=None)
+            )
+            db.add(
+                Message(
+                    conversation_id=conv_id,
+                    role="assistant",
+                    content=answer,
+                    sources=json.dumps(sources, ensure_ascii=False) if sources else None,
+                )
+            )
+            await db.commit()
+    except Exception:
+        pass
 
 
 @router.get("/history")
