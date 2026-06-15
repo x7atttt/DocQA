@@ -22,8 +22,14 @@ async def init_db() -> None:
         await conn.run_sync(Base.metadata.create_all)
         await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_documents_user_id ON documents(user_id)"))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at)"))
-        # 轻量迁移：为旧库补 reasoning 列（SQLite 支持 IF NOT EXISTS 语义通过 try 兜底）
+        # 轻量迁移：为旧库补列
         await _ensure_column(conn, "messages", "reasoning", "TEXT")
+        await _ensure_column(conn, "documents", "file_hash", "TEXT")
+        # 用户内去重：同 user_id + file_hash 唯一（SQLite 中多个 NULL 不冲突，旧数据安全）
+        await conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_user_hash "
+            "ON documents(user_id, file_hash)"
+        ))
 
 
 async def _ensure_column(conn, table: str, column: str, ddl_type: str) -> None:

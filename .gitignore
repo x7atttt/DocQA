@@ -27,8 +27,9 @@ data/
 *.sqlite3
 
 # 模型权重（已单独管理，不入库）
-models/
-!models/.gitkeep
+# 注意：用前导 / 锚定项目根，避免误伤 app/models/（数据库模型代码目录）
+/models/
+!/models/.gitkeep
 
 # IDE
 .vscode/

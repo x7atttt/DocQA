@@ -137,7 +137,9 @@
         fileInput.value = ""; // 允许重复选同一文件
     });
 
-    async function uploadFile(file) {
+    const uploadBar = document.getElementById("uploadBar");
+
+    function uploadFile(file) {
         // 前端预校验
         const ext = file.name.split(".").pop().toLowerCase();
         if (!["pdf", "docx", "md"].includes(ext)) {
@@ -149,37 +151,76 @@
             return;
         }
 
+        // 重置进度 UI
         uploadFileName.textContent = file.name;
-        uploadStatus.textContent = "上传与解析中...";
+        uploadStatus.textContent = "上传中 0%";
+        uploadStatus.className = "text-muted";
+        uploadBar.style.width = "0%";
+        uploadBar.className = "progress-bar";
         uploadBox.classList.remove("d-none");
 
+        const token = Token.get();
         const fd = new FormData();
         fd.append("file", file);
-        const token = Token.get();
 
-        try {
-            const resp = await fetch(ENDPOINTS.documents.upload, {
-                method: "POST",
-                headers: token ? { Authorization: `Bearer ${token}` } : {},
-                body: fd,
-            });
-            if (resp.status === 401) {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", ENDPOINTS.documents.upload);
+        xhr.timeout = 120000; // 120 秒超时（覆盖上传 + 解析 + 向量化）
+        if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+
+        // 上传进度（fetch 不支持 upload progress，必须用 XHR）
+        xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable) {
+                const pct = Math.round((e.loaded / e.total) * 100);
+                uploadBar.style.width = pct + "%";
+                if (pct < 100) {
+                    uploadStatus.textContent = `上传中 ${pct}%`;
+                } else {
+                    // 上传完成，进入后端解析阶段（不定条纹动画）
+                    uploadStatus.textContent = "解析与向量化中...";
+                    uploadBar.classList.add("progress-bar-striped", "progress-bar-animated");
+                }
+            }
+        };
+
+        xhr.onload = () => {
+            if (xhr.status === 401) {
                 Token.clear();
                 location.href = "/login.html";
                 return;
             }
-            const payload = await resp.json().catch(() => null);
-            if (!payload || payload.code !== 0) {
-                throw new Error(payload?.message || `上传失败 (HTTP ${resp.status})`);
+            const payload = JSON.parse(xhr.responseText || "{}");
+            if (xhr.status === 200 && payload.code === 0) {
+                uploadStatus.textContent = "完成";
+                uploadStatus.className = "text-success";
+                showToast("上传成功", "success");
+                loadFirst();
+            } else if (xhr.status === 409 || payload.code === 20005) {
+                uploadStatus.textContent = "已存在";
+                uploadStatus.className = "text-warning";
+                showToast("该文档已上传过，无需重复上传", "warning");
+            } else {
+                uploadStatus.textContent = "失败";
+                uploadStatus.className = "text-danger";
+                showToast(payload?.message || `上传失败 (HTTP ${xhr.status})`, "danger");
             }
-            uploadStatus.textContent = "完成";
-            showToast("上传成功", "success");
-            await loadFirst();
-        } catch (err) {
-            uploadStatus.textContent = "失败";
-            showToast(err.message, "danger");
-        } finally {
             setTimeout(() => uploadBox.classList.add("d-none"), 1500);
-        }
+        };
+
+        xhr.onerror = () => {
+            uploadStatus.textContent = "网络错误";
+            uploadStatus.className = "text-danger";
+            showToast("网络错误，请检查服务是否启动", "danger");
+            setTimeout(() => uploadBox.classList.add("d-none"), 1500);
+        };
+
+        xhr.ontimeout = () => {
+            uploadStatus.textContent = "超时";
+            uploadStatus.className = "text-danger";
+            showToast("上传超时（文档可能过大或服务繁忙），请重试", "danger");
+            setTimeout(() => uploadBox.classList.add("d-none"), 1500);
+        };
+
+        xhr.send(fd);
     }
 })();

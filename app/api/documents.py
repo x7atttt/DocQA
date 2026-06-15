@@ -42,6 +42,23 @@ async def upload(
     if len(content) > MAX_FILE_SIZE:
         raise BizError(code=ResponseCode.DOC_UPLOAD_FAILED, message="文件超过 20MB 限制", http_status=400)
 
+    # 内容哈希查重（用户内）—— 在解析/向量化之前拦截，省 embedding 算力
+    import hashlib
+
+    file_hash = hashlib.sha256(content).hexdigest()
+    existing = await db.execute(
+        select(Document).where(
+            Document.user_id == user.id,
+            Document.file_hash == file_hash,
+        )
+    )
+    if existing.scalar_one_or_none() is not None:
+        raise BizError(
+            code=ResponseCode.DOC_ALREADY_EXISTS,
+            message="该文档已上传过，无需重复上传",
+            http_status=409,
+        )
+
     file_path, _ = save_upload_file(content, ext)
     try:
         document = await process_document(
@@ -51,6 +68,7 @@ async def upload(
             file_size=len(content),
             user_id=user.id,
             db=db,
+            file_hash=file_hash,
         )
     except Exception:
         import os

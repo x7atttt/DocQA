@@ -95,6 +95,7 @@ async def process_document(
     file_size: int,
     user_id: int,
     db: AsyncSession,
+    file_hash: str | None = None,
 ) -> Document:
     if ext not in SUPPORTED_EXTS:
         raise BizError(
@@ -123,6 +124,7 @@ async def process_document(
         file_type=ext,
         chunk_count=len(chunks),
         file_size=file_size,
+        file_hash=file_hash,
     )
     db.add(document)
     await db.commit()
