@@ -1,10 +1,11 @@
 /**
- * 对话页：SSE 流式问答 + 来源引用渲染
+ * 对话页：SSE 流式问答 + 来源引用渲染 + 推理过程折叠
  *
  * 后端 SSE 协议（标准 event:/data: 帧）：
  *   event: sources       data: [SourceItem]        JSON，检索到的来源（token 之前最多发一次）
- *   event: token         data: <原始字符串>          裸字符串，LLM 增量内容
- *   event: answer_final  data: <JSON 字符串>        完整答案
+ *   event: reasoning     data: <原始字符串>          裸字符串，推理过程增量（DeepSeek reasoner 等）
+ *   event: token         data: <原始字符串>          裸字符串，LLM 正式答案增量
+ *   event: answer_final  data: {"answer":...[, "reasoning":...]}  完整答案/推理
  *   event: done          data: {"status":"ok"[,"cache":"hit"|"wait"]}
  *   event: error         data: {"message":"..."}
  */
@@ -28,6 +29,14 @@
     const questionInput = document.getElementById("questionInput");
     const sendBtn = document.getElementById("sendBtn");
     const statusHint = document.getElementById("statusHint");
+    const thinkingToggle = document.getElementById("thinkingToggle");
+
+    // 深度思考开关：用 localStorage 记住用户偏好
+    const THINKING_KEY = "docqa_thinking";
+    thinkingToggle.checked = localStorage.getItem(THINKING_KEY) === "1";
+    thinkingToggle.addEventListener("change", () => {
+        localStorage.setItem(THINKING_KEY, thinkingToggle.checked ? "1" : "0");
+    });
 
     let streaming = false; // 是否正在接收流（防止并发）
 
@@ -40,52 +49,100 @@
         scrollToBottom();
     }
 
-    /** 创建一条助手消息，返回 { row, contentEl } 用于流式追加 */
+    /**
+     * 创建一条助手消息，返回：
+     *   { row, contentEl, reasoningBox, reasoningEl, sourcesArea }
+     * reasoningBox: 推理折叠面板容器（<details>），初始隐藏；收到 reasoning 事件才显示
+     */
     function createAssistantMsg() {
         const row = document.createElement("div");
         row.className = "msg-row assistant-row";
         row.innerHTML = `
             <div class="bubble assistant-bubble">
+                <details class="reasoning-panel mb-2" style="display:none">
+                    <summary class="reasoning-summary">
+                        <i class="bi bi-lightbulb me-1"></i>推理过程
+                        <span class="reasoning-hint small text-muted ms-1">点击展开/收起</span>
+                    </summary>
+                    <div class="reasoning-content mt-1"></div>
+                </details>
                 <div class="assistant-content"><span class="typing-cursor"></span></div>
             </div>
             <div class="sources-area mt-2"></div>
         `;
         chatBox.appendChild(row);
         const contentEl = row.querySelector(".assistant-content");
-        return { row, contentEl };
+        const reasoningBox = row.querySelector(".reasoning-panel");
+        const reasoningEl = row.querySelector(".reasoning-content");
+        const sourcesArea = row.querySelector(".sources-area");
+        return { row, contentEl, reasoningBox, reasoningEl, sourcesArea };
     }
 
-    function renderSources(areaEl, sources) {
-        if (!sources || !sources.length) return;
-        const cards = sources
-            .map((s, i) => {
-                const name = escapeHtml(s.filename || "来源");
-                const score = typeof s.score === "number" ? (s.score * 100).toFixed(0) + "%" : "";
-                const snippet = escapeHtml((s.content || "").slice(0, 120)) + (s.content && s.content.length > 120 ? "…" : "");
-                return `<div class="source-card">
-                    <div class="d-flex justify-content-between">
-                        <span class="fw-semibold"><i class="bi bi-link-45deg me-1"></i>${i + 1}. ${name}</span>
-                        ${score ? `<span class="badge bg-success-subtle text-success">${score}</span>` : ""}
-                    </div>
-                    <div class="source-snippet small text-muted mt-1">${snippet}</div>
-                </div>`;
-            })
-            .join("");
-        areaEl.innerHTML = `<div class="sources-label small text-muted mb-1"><i class="bi bi-quote me-1"></i>参考来源</div>${cards}`;
+    function renderMarkdownHighlight(html) {
+        // 代码高亮
+        html.querySelectorAll("pre code").forEach((b) => {
+            if (window.hljs) try { window.hljs.highlightElement(b); } catch {}
+        });
     }
 
     function scrollToBottom() {
         chatBox.scrollTop = chatBox.scrollHeight;
     }
 
+    // ---------- 来源卡片（点击展开完整原文）----------
+    function renderSources(areaEl, sources) {
+        if (!sources || !sources.length) return;
+        const cards = sources
+            .map((s, i) => {
+                const name = escapeHtml(s.filename || "来源");
+                const score = typeof s.score === "number" ? (s.score * 100).toFixed(0) + "%" : "";
+                const fullContent = escapeHtml(s.content || "");
+                const snippet =
+                    escapeHtml((s.content || "").slice(0, 120)) + (s.content && s.content.length > 120 ? "…" : "");
+                return `<div class="source-card" data-full="${fullContent}">
+                    <div class="d-flex justify-content-between">
+                        <span class="fw-semibold"><i class="bi bi-link-45deg me-1"></i>${i + 1}. ${name}</span>
+                        <span>
+                            ${score ? `<span class="badge bg-success-subtle text-success">${score}</span>` : ""}
+                            <button class="btn btn-sm btn-link p-0 ms-1 src-expand"><i class="bi bi-arrows-expand"></i></button>
+                        </span>
+                    </div>
+                    <div class="source-snippet small text-muted mt-1">${snippet}</div>
+                </div>`;
+            })
+            .join("");
+        areaEl.innerHTML = `<div class="sources-label small text-muted mb-1"><i class="bi bi-quote me-1"></i>参考来源（模型基于以下文档片段回答）</div>${cards}`;
+    }
+
+    // 点击来源卡片的展开按钮 → 切换显示完整原文
+    document.addEventListener("click", (e) => {
+        const btn = e.target.closest(".src-expand");
+        if (!btn) return;
+        const card = btn.closest(".source-card");
+        const snippetEl = card.querySelector(".source-snippet");
+        const full = card.dataset.full;
+        if (card.dataset.expanded === "1") {
+            // 收起：恢复摘要
+            snippetEl.textContent = (card.dataset.origSnippet || "") + ((card.dataset.origFull || "").length > 120 ? "…" : "");
+            card.dataset.expanded = "0";
+            btn.innerHTML = `<i class="bi bi-arrows-expand"></i>`;
+        } else {
+            if (!card.dataset.origSnippet) {
+                card.dataset.origSnippet = snippetEl.textContent.replace(/…$/, "");
+                card.dataset.origFull = full;
+            }
+            snippetEl.textContent = full;
+            card.dataset.expanded = "1";
+            btn.innerHTML = `<i class="bi bi-arrows-collapse"></i>`;
+        }
+    });
+
     // ---------- SSE 帧解析器（跨 chunk 缓冲）----------
-    // 后端按 "event: xxx\ndata: yyy\n\n" 推送，需要缓冲不完整帧
     function createSSEParser(handlers) {
         let buffer = "";
         return {
             feed(chunk) {
                 buffer += chunk;
-                // 按空行切分（标准 SSE 帧分隔）
                 let idx;
                 while ((idx = buffer.indexOf("\n\n")) !== -1) {
                     const frame = buffer.slice(0, idx);
@@ -101,13 +158,13 @@
     }
 
     function parseFrame(frame, handlers) {
-        let event = "message"; // SSE 默认事件名
+        let event = "message";
         const dataLines = [];
         frame.split("\n").forEach((line) => {
             if (line.startsWith("event:")) {
                 event = line.slice(6).trim();
             } else if (line.startsWith("data:")) {
-                dataLines.push(line.slice(5).replace(/^ /, "")); // 去掉单个前导空格
+                dataLines.push(line.slice(5).replace(/^ /, ""));
             }
         });
         if (!dataLines.length) return;
@@ -121,22 +178,25 @@
         if (streaming) return;
         streaming = true;
         setSending(true);
-        statusHint.textContent = "正在检索文档...";
+        const thinking = thinkingToggle.checked;
+        statusHint.textContent = thinking ? "深度思考中..." : "正在检索文档...";
 
         appendUserMsg(question);
 
-        const { row, contentEl } = createAssistantMsg();
-        const sourcesArea = row.querySelector(".sources-area");
+        const { contentEl, reasoningBox, reasoningEl, sourcesArea } = createAssistantMsg();
         let fullAnswer = "";
-        let cursor = contentEl.querySelector(".typing-cursor");
+        let fullReasoning = "";
 
         function updateContent() {
-            // 保留打字光标
             contentEl.innerHTML = renderMarkdown(fullAnswer) + `<span class="typing-cursor"></span>`;
-            // 代码高亮
-            contentEl.querySelectorAll("pre code").forEach((b) => {
-                if (window.hljs) try { window.hljs.highlightElement(b); } catch {}
-            });
+            renderMarkdownHighlight(contentEl);
+            scrollToBottom();
+        }
+
+        function updateReasoning() {
+            // 推理内容用纯文本 + 换行保留（不渲染 markdown，避免与正文混淆）
+            reasoningEl.innerHTML = `<pre class="reasoning-pre">${escapeHtml(fullReasoning)}</pre>`;
+            reasoningBox.style.display = "block";
             scrollToBottom();
         }
 
@@ -148,20 +208,27 @@
                 } catch {}
                 statusHint.textContent = "正在生成回答...";
             },
+            reasoning: (raw) => {
+                fullReasoning += raw;
+                updateReasoning();
+                if (statusHint.textContent === "正在检索文档...") statusHint.textContent = "正在推理...";
+            },
             token: (raw) => {
-                // token 的 data 是裸字符串，直接追加
                 fullAnswer += raw;
                 updateContent();
-                if (statusHint.textContent === "正在检索文档...") statusHint.textContent = "正在生成回答...";
+                if (statusHint.textContent === "正在检索文档..." || statusHint.textContent === "正在推理...") {
+                    statusHint.textContent = "正在生成回答...";
+                }
             },
             answer_final: (raw) => {
-                // data 是 JSON 字符串，内容为完整答案
                 try {
                     const obj = JSON.parse(raw);
-                    if (typeof obj === "string") fullAnswer = obj;
-                    else if (obj && typeof obj.answer === "string") fullAnswer = obj.answer;
+                    if (obj && typeof obj.answer === "string") fullAnswer = obj.answer;
+                    if (obj && typeof obj.reasoning === "string" && obj.reasoning) {
+                        fullReasoning = obj.reasoning;
+                        updateReasoning();
+                    }
                 } catch {
-                    // 退化为直接用 raw
                     if (raw) fullAnswer = raw;
                 }
                 updateContent();
@@ -185,13 +252,14 @@
 
         try {
             const token = Token.get();
+            const thinking = thinkingToggle.checked;
             const resp = await fetch(ENDPOINTS.chat.ask, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
                     ...(token ? { Authorization: `Bearer ${token}` } : {}),
                 },
-                body: JSON.stringify({ question }),
+                body: JSON.stringify({ question, thinking }),
             });
 
             if (resp.status === 401) {
@@ -214,7 +282,7 @@
             parser.flush();
 
             // 流结束后移除打字光标
-            cursor = contentEl.querySelector(".typing-cursor");
+            const cursor = contentEl.querySelector(".typing-cursor");
             if (cursor) cursor.remove();
         } catch (err) {
             contentEl.innerHTML = `<div class="text-danger"><i class="bi bi-exclamation-triangle me-1"></i>${escapeHtml(err.message)}</div>`;
@@ -222,7 +290,7 @@
         } finally {
             streaming = false;
             setSending(false);
-            if (statusHint.textContent === "正在检索文档..." || statusHint.textContent === "正在生成回答...") {
+            if (statusHint.textContent === "正在检索文档..." || statusHint.textContent === "正在生成回答..." || statusHint.textContent === "正在推理...") {
                 statusHint.textContent = "完成";
             }
         }
@@ -244,7 +312,6 @@
         ask(q);
     });
 
-    // Enter 发送，Shift+Enter 换行
     questionInput.addEventListener("keydown", (e) => {
         if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
@@ -252,14 +319,12 @@
         }
     });
 
-    // 文本框自适应高度
     function autoResize() {
         questionInput.style.height = "auto";
         questionInput.style.height = Math.min(questionInput.scrollHeight, 160) + "px";
     }
     questionInput.addEventListener("input", autoResize);
 
-    // 示例问题点击
     document.addEventListener("click", (e) => {
         if (e.target.classList.contains("example-q")) {
             e.preventDefault();

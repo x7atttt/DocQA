@@ -6,6 +6,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class ChatAskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
+    # 是否开启 DeepSeek thinking 模式（用户自定义，默认关闭）
+    thinking: bool = False
 
 
 class SourceItem(BaseModel):

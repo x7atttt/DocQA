@@ -35,20 +35,24 @@ def get_user_collection(user_id: int) -> chromadb.Collection:
 
 
 def _parse_pdf_sync(file_path: str) -> str:
-    import fitz
+    """用 pymupdf4llm 解析 PDF → Markdown（版面感知，保留表格/多栏顺序/标题层级）。
 
-    doc = fitz.open(file_path)
-    try:
-        return "\n".join(page.get_text() for page in doc).strip()
-    finally:
-        doc.close()
+    不含 OCR：扫描件（图片型 PDF）会返回空字符串，由上层报错提示。
+    如需 OCR 能力需额外安装 Tesseract 并启用 force_ocr。
+    """
+    import pymupdf4llm
+
+    md = pymupdf4llm.to_markdown(file_path)  # write_images 默认 False，不提取图片
+    return md.strip()
 
 
 def _parse_docx_sync(file_path: str) -> str:
-    from docx import Document as DocxDocument
+    """用 MarkItDown 解析 DOCX → Markdown（mammoth 底层，保留表格结构）。"""
+    from markitdown import MarkItDown
 
-    doc = DocxDocument(file_path)
-    return "\n".join(p.text for p in doc.paragraphs).strip()
+    md = MarkItDown()
+    result = md.convert(file_path)
+    return result.text_content.strip()
 
 
 def _parse_markdown_sync(file_path: str) -> str:

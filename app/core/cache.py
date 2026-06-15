@@ -74,7 +74,12 @@ async def get_cached_answer(user_id: int, question: str) -> tuple[bool, dict | N
 
 
 async def set_cached_answer(
-    user_id: int, question: str, answer: str, sources: list | None
+    user_id: int,
+    question: str,
+    answer: str,
+    sources: list | None,
+    reasoning: str | None = None,
+    thinking: bool = False,
 ) -> None:
     client = await get_redis()
     if client is None:
@@ -86,7 +91,13 @@ async def set_cached_answer(
             )
             return
         payload = json.dumps(
-            {"answer": answer, "sources": sources or []}, ensure_ascii=False
+            {
+                "answer": answer,
+                "sources": sources or [],
+                "reasoning": reasoning or "",
+                "thinking": thinking,
+            },
+            ensure_ascii=False,
         )
         base = settings.cache_ttl_seconds
         jitter = random.randint(-int(base * 0.2), int(base * 0.2))

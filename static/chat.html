@@ -38,6 +38,15 @@
         <!-- 输入区 -->
         <div class="chat-input-area">
             <div class="container">
+                <div class="d-flex align-items-center justify-content-between mb-2">
+                    <div class="form-check form-switch thinking-switch mb-0">
+                        <input class="form-check-input" type="checkbox" id="thinkingToggle">
+                        <label class="form-check-label small" for="thinkingToggle" title="开启后模型会先进行推理再回答（更慢但更深入）">
+                            <i class="bi bi-lightbulb"></i> 深度思考
+                        </label>
+                    </div>
+                    <span class="text-muted small" id="statusHint">就绪</span>
+                </div>
                 <form id="askForm" class="d-flex gap-2 align-items-end">
                     <div class="flex-grow-1">
                         <textarea id="questionInput" class="form-control" rows="1"
@@ -47,9 +56,6 @@
                         <i class="bi bi-send"></i> 发送
                     </button>
                 </form>
-                <div class="text-center text-muted small mt-1">
-                    <span id="statusHint">就绪</span>
-                </div>
             </div>
         </div>
     </div>

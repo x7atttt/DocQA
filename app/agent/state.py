@@ -9,13 +9,29 @@ class SourceItem(TypedDict):
     score: float
 
 
+class HistoryItem(TypedDict):
+    """单条历史对话，role ∈ {'user', 'assistant'}。"""
+    role: str
+    content: str
+
+
 class AgentState(TypedDict, total=False):
     user_id: int
     question: str
+    # 意图路由
     should_retrieve: bool
+    # 检索
     retrieved_docs: list[str]
     sources: list[SourceItem]
+    # 多轮上下文：最近 N 轮历史（正序，最旧在前）
+    history: list[HistoryItem]
+    # 是否开启 DeepSeek thinking 模式（用户自定义）
+    thinking: bool
+    # 答案
     answer_tokens: list[str]
     answer: str
+    # 推理内容（DeepSeek reasoner / thinking 模式）
+    reasoning_tokens: list[str]
+    reasoning: str
     error: str | None
     meta: dict[str, Any]

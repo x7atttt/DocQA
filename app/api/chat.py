@@ -28,6 +28,10 @@ def _stream_cached(cached: dict, cache_tag: str):
     async def gen():
         if cached.get("sources"):
             yield sse("sources", cached["sources"])
+        # 缓存命中时回放完整 reasoning（如有）
+        reasoning = cached.get("reasoning")
+        if reasoning:
+            yield sse("reasoning", reasoning)
         if cached.get("answer"):
             for i in range(0, len(cached["answer"]), 4):
                 yield sse("token", cached["answer"][i : i + 4])
@@ -49,9 +53,14 @@ async def ask(
         raise BizError(code=ResponseCode.EMPTY_QUESTION, message="问题不能为空", http_status=400)
 
     user_id = user.id
+    thinking = bool(body.thinking)
 
+    # 取最近若干轮历史作为多轮上下文（正序：最旧在前）
+    history = await _load_recent_history(user_id, rounds=5)
+
+    # 缓存命中时需匹配 thinking 模式（开启/关闭 thinking 的答案不共享）
     hit, cached = await get_cached_answer(user_id, question)
-    if hit and cached and cached.get("answer"):
+    if hit and cached and cached.get("answer") and bool(cached.get("thinking", False)) == thinking:
         return StreamingResponse(
             _stream_cached(cached, "hit"),
             media_type="text/event-stream",
@@ -64,7 +73,7 @@ async def ask(
         for _ in range(8):
             await asyncio.sleep(0.3)
             hit2, cached2 = await get_cached_answer(user_id, question)
-            if hit2 and cached2 and cached2.get("answer"):
+            if hit2 and cached2 and cached2.get("answer") and bool(cached2.get("thinking", False)) == thinking:
                 return StreamingResponse(
                     _stream_cached(cached2, "wait"),
                     media_type="text/event-stream",
@@ -76,16 +85,26 @@ async def ask(
 
     async def event_stream():
         answer_parts: list[str] = []
+        reasoning_parts: list[str] = []
         sources: list[dict] = []
         error_msg: str | None = None
 
         try:
-            async for event_name, payload in stream_graph(graph, user_id, question):
+            async for event_name, payload in stream_graph(graph, user_id, question, history, thinking):
                 yield sse(event_name, payload)
                 if event_name == "token":
                     answer_parts.append(payload)
+                elif event_name == "reasoning":
+                    reasoning_parts.append(payload)
                 elif event_name == "sources":
                     sources = payload
+                elif event_name == "answer_final":
+                    # 用流末的权威完整答案/推理覆盖（避免流式拼接遗漏）
+                    if isinstance(payload, dict):
+                        if payload.get("answer"):
+                            answer_parts = [payload["answer"]]
+                        if payload.get("reasoning"):
+                            reasoning_parts = [payload["reasoning"]]
                 elif event_name == "error":
                     error_msg = payload.get("message", "未知错误")
         except asyncio.CancelledError:
@@ -96,9 +115,11 @@ async def ask(
                     user_id=user_id,
                     question=question,
                     answer_parts=answer_parts,
+                    reasoning_parts=reasoning_parts,
                     sources=sources,
                     error_msg=error_msg,
                     lock_token=lock_token,
+                    thinking=thinking,
                 )
             )
 
@@ -109,21 +130,53 @@ async def ask(
     )
 
 
+async def _load_recent_history(user_id: int, rounds: int = 5) -> list[dict]:
+    """读取当前用户最近 N 轮历史消息，返回正序（最旧在前）。
+
+    用于多轮上下文。注意：当前 history 端点是跨会话按时间倒序的消息流，
+    这里同样按全局最近消息取，不区分 conversation。
+    """
+    try:
+        async with async_session_factory() as db:
+            # 取最近 rounds*2 条（user+assistant 各一），倒序取再反转成正序
+            stmt = (
+                select(Message)
+                .join(Conversation, Message.conversation_id == Conversation.id)
+                .where(Conversation.user_id == user_id)
+                .order_by(Message.id.desc())
+                .limit(rounds * 2)
+            )
+            result = await db.execute(stmt)
+            msgs = result.scalars().all()
+        # 反转为正序，并只保留 user/assistant 的文本内容
+        history = [
+            {"role": m.role, "content": m.content}
+            for m in reversed(msgs)
+            if m.role in ("user", "assistant") and m.content
+        ]
+        return history
+    except Exception:
+        return []
+
+
 async def _finalize(
     user_id: int,
     question: str,
     answer_parts: list[str],
+    reasoning_parts: list[str] | None,
     sources: list[dict],
     error_msg: str | None,
     lock_token: str | None,
+    thinking: bool = False,
 ) -> None:
     answer = "".join(answer_parts)
+    reasoning = "".join(reasoning_parts) if reasoning_parts else ""
     if lock_token:
         await release_lock(user_id, question, lock_token)
     if error_msg or not answer:
         return
     try:
-        await set_cached_answer(user_id, question, answer, sources)
+        await set_cached_answer(user_id, question, answer, sources, reasoning, thinking)
     except Exception:
         pass
     try:
@@ -141,6 +194,7 @@ async def _finalize(
                     role="assistant",
                     content=answer,
                     sources=json.dumps(sources, ensure_ascii=False) if sources else None,
+                    reasoning=reasoning or None,
                 )
             )
             await db.commit()
