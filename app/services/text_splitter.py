@@ -1,13 +1,16 @@
 """文本分块策略模块。
 
-支持三种可配置切换的策略（通过 settings.split_strategy 选择）：
-  - fixed:    定长字符滑窗（带重叠），最简单快速，不感知语义边界，作为兜底
-  - markdown: 先按 Markdown 标题(#/##/###) 切分子节保持结构，再对超长节递归切分
-  - recursive: 递归尝试分隔符（段落→换行→句号→空格）切分，兼顾语义边界与长度控制（默认）
+支持四种可配置切换的策略（通过 settings.split_strategy 选择）：
+  - auto:      按文件类型自动路由（md→markdown，pdf/docx→recursive），默认
+  - fixed:     定长字符滑窗（带重叠），最简单快速，不感知语义边界，作为兜底
+  - markdown:  先按 Markdown 标题(#/##/###) 切分子节保持结构，再对超长节递归切分
+  - recursive: 递归尝试分隔符（段落→换行→句号→空格）切分，兼顾语义边界与长度控制
 
 设计权衡：
   fixed 最快但可能在句子/表格中间硬切；markdown 保结构但依赖文档有标题；
-  recursive 通用性最强，作为默认策略。三种策略均可通过 .env 的 SPLIT_STRATEGY 切换。
+  recursive 通用性最强。auto 按文件类型选最优：原生 md 文件标题结构最完整走 markdown，
+  pdf/docx 经 pymupdf4llm/MarkItDown 转换后标题层级可能不规整走 recursive 更稳健。
+  fixed 不作为自动选项，保留为手动可配置的兜底。
 """
 
 from langchain_text_splitters import (
@@ -21,23 +24,43 @@ _RECURSIVE_SEPARATORS = ["\n\n", "\n", "。", "！", "？", ".", "!", "?", " ", 
 # Markdown 标题层级 → metadata key 映射
 _MD_HEADERS = [("#", "h1"), ("##", "h2"), ("###", "h3")]
 
+# auto 策略的文件类型 → 策略映射
+_AUTO_STRATEGY_MAP = {
+    "md": "markdown",     # 原生 Markdown，标题结构最完整
+    "pdf": "recursive",   # pymupdf4llm 转换的 md 标题层级可能不规整，recursive 更稳健
+    "docx": "recursive",  # MarkItDown 转换的同理
+}
+
+
+def _resolve_auto_strategy(ext: str | None) -> str:
+    """auto 策略：按文件扩展名路由到具体策略。"""
+    if ext and ext.lower() in _AUTO_STRATEGY_MAP:
+        return _AUTO_STRATEGY_MAP[ext.lower()]
+    return "recursive"  # 未知类型兜底
+
 
 def split_text(
     text: str,
     strategy: str = "recursive",
     chunk_size: int = 500,
     chunk_overlap: int = 100,
+    ext: str | None = None,
 ) -> list[str]:
     """根据策略切分文本，返回非空 chunks 列表。
 
     Args:
         text: 待分块的原始文本（通常是解析后的 Markdown）
-        strategy: fixed | markdown | recursive
+        strategy: auto | fixed | markdown | recursive
         chunk_size: 每块最大字符数
         chunk_overlap: 相邻块重叠字符数
+        ext: 文件扩展名（仅 auto 策略用于路由，如 "md"/"pdf"/"docx"）
     """
     if not text or not text.strip():
         return []
+
+    # auto 按文件类型路由
+    if strategy == "auto":
+        strategy = _resolve_auto_strategy(ext)
 
     if strategy == "fixed":
         chunks = _fixed_size_split(text, chunk_size, chunk_overlap)

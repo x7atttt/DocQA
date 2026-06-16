@@ -24,8 +24,8 @@ class Settings(BaseSettings):
 
     chunk_size: int = 500
     chunk_overlap: int = 100
-    # 分块策略：fixed（定长滑窗）| markdown（标题感知两阶段）| recursive（递归分隔符）
-    split_strategy: str = "recursive"
+    # 分块策略：auto（按类型路由）| fixed | markdown | recursive
+    split_strategy: str = "auto"
 
     retrieve_top_k: int = 20
     rerank_top_k: int = 3

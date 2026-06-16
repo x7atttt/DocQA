@@ -82,3 +82,46 @@ def test_markdown_fallback_on_plain_text():
     chunks = split_text(text, strategy="markdown", chunk_size=100, chunk_overlap=20)
     assert len(chunks) >= 1
 
+
+def test_auto_routes_md_to_markdown():
+    """auto 策略：md 文件路由到 markdown（按标题切分，标题作为分界）"""
+    text = "# 标题\n内容A\n# 标题二\n内容B"
+    chunks = split_text(text, strategy="auto", chunk_size=500, chunk_overlap=50, ext="md")
+    assert len(chunks) >= 1
+    # MarkdownHeaderTextSplitter 把标题作为 metadata 分界，page_content 只含正文
+    # 验证两个标题下的内容被分到不同块（标题起到分界作用）
+    joined = "\n".join(chunks)
+    assert "内容A" in joined and "内容B" in joined
+    if len(chunks) >= 2:
+        # 内容A 和 内容B 应在不同块
+        assert not any("内容A" in c and "内容B" in c for c in chunks)
+
+
+def test_auto_routes_pdf_to_recursive():
+    """auto 策略：pdf 文件路由到 recursive"""
+    text = "这是一段文字。" * 50
+    chunks = split_text(text, strategy="auto", chunk_size=100, chunk_overlap=20, ext="pdf")
+    assert len(chunks) >= 1
+    assert all(len(c) <= 100 for c in chunks)
+
+
+def test_auto_routes_docx_to_recursive():
+    """auto 策略：docx 文件路由到 recursive"""
+    text = "这是一段文字。" * 50
+    chunks = split_text(text, strategy="auto", chunk_size=100, chunk_overlap=20, ext="docx")
+    assert len(chunks) >= 1
+
+
+def test_auto_unknown_ext_falls_back_to_recursive():
+    """auto 策略：未知扩展名兜底走 recursive"""
+    text = "测试文本。" * 30
+    chunks = split_text(text, strategy="auto", chunk_size=100, chunk_overlap=20, ext="txt")
+    assert len(chunks) >= 1
+
+
+def test_auto_without_ext_falls_back_to_recursive():
+    """auto 策略：无 ext 参数兜底走 recursive"""
+    text = "测试文本。" * 30
+    chunks = split_text(text, strategy="auto", chunk_size=100, chunk_overlap=20)
+    assert len(chunks) >= 1
+

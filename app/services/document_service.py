@@ -119,11 +119,11 @@ async def process_document(
             http_status=400,
         )
 
-    # 分块：按配置策略切分（fixed/markdown/recursive），修复原来直调 _chunk_text_sync 绕过策略的 bug
+    # 分块：按配置策略切分（auto/fixed/markdown/recursive），传 ext 供 auto 路由
     from app.services.text_splitter import split_text
 
     chunks = await asyncio.to_thread(
-        split_text, text, settings.split_strategy, settings.chunk_size, settings.chunk_overlap
+        split_text, text, settings.split_strategy, settings.chunk_size, settings.chunk_overlap, ext
     )
     if not chunks:
         raise BizError(code=ResponseCode.DOC_PARSE_FAILED, message="文档内容为空", http_status=400)
