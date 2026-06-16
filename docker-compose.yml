@@ -1,0 +1,47 @@
+# docker-compose.yml - AI 智能文档问答系统
+# 使用：docker compose up -d --build
+# 日志：docker compose logs -f app
+# 停止：docker compose down
+
+services:
+  app:
+    build: .
+    container_name: docqa-app
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      # 持久化：SQLite + ChromaDB 数据（容器重建不丢）
+      - ./data:/app/data
+      # 模型权重挂载（避免打进镜像导致镜像 3GB+）
+      - ./models:/app/models:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    # 内存限制：bge-m3(~1.2G) + bge-reranker(~2G) + 应用，留余量
+    mem_limit: 6g
+    deploy:
+      resources:
+        limits:
+          memory: 6G
+
+  redis:
+    image: redis:7-alpine
+    container_name: docqa-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    # 缓存数据非关键，内存限制宽松
+    mem_limit: 512m
+
+volumes:
+  redis-data:

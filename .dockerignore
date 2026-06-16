@@ -1,0 +1,31 @@
+# 模型权重（通过 volume 挂载，不打进镜像）
+models/
+
+# 运行时数据（通过 volume 挂载）
+data/
+
+# Python 缓存与虚拟环境
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# 环境变量与密钥（compose 的 env_file 单独注入）
+.env
+.env.local
+
+# IDE / 系统 / 日志
+.vscode/
+.idea/
+*.swp
+.DS_Store
+*.log
+
+# Git
+.git/
+.gitignore
+
+# 本地测试脚本
+test.py
+_debug_*.py
