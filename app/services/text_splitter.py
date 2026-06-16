@@ -33,10 +33,11 @@ _AUTO_STRATEGY_MAP = {
 
 
 def _resolve_auto_strategy(ext: str | None) -> str:
-    """auto 策略：按文件扩展名路由到具体策略。"""
-    if ext and ext.lower() in _AUTO_STRATEGY_MAP:
-        return _AUTO_STRATEGY_MAP[ext.lower()]
-    return "recursive"  # 未知类型兜底
+    """auto 策略：按文件扩展名路由到具体策略。
+
+    仅支持 md/pdf/docx 三种类型（由 SUPPORTED_EXTS 约束，上传层已拦截其他类型）。
+    """
+    return _AUTO_STRATEGY_MAP[(ext or "").lower()]
 
 
 def split_text(

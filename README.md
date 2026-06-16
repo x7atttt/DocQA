@@ -10,11 +10,16 @@
 
 | 特性 | 说明 |
 |------|------|
-| 📄 **多格式文档** | 支持 PDF / DOCX / Markdown，自动分块、Embedding 入库 |
+| 📄 **多格式文档** | 支持 PDF / DOCX / Markdown，pymupdf4llm + MarkItDown 解析，自动分块、Embedding 入库 |
+| 🧩 **多策略分块** | auto 按文件类型路由（md→markdown，pdf/docx→recursive），可选 fixed/markdown/recursive |
 | 🔍 **RAG 检索增强** | bge-m3 向量检索（稠密+稀疏+ColBERT 多视图）+ bge-reranker-v2-m3 重排序 |
-| 🤖 **LangGraph Agent** | 状态图编排检索 → 重排 → 生成节点，可扩展工具调用 |
+| 🤖 **LangGraph Agent** | 状态图编排检索 → 重排 → 生成节点，意图路由按需检索 |
+| 💡 **深度思考模式** | DeepSeek thinking 开关，推理过程可折叠查看（langchain-deepseek 原生 reasoning_content）|
 | ⚡ **SSE 流式输出** | Server-Sent Events 实时打字机效果，答案逐字呈现 |
-| 🚀 **多级缓存 + 限流** | Redis 缓存（含空值防穿透）+ slowapi 令牌桶限流 |
+| 🔁 **多轮上下文** | 保留最近 5 轮对话历史，支持指代理解（"它""上面那个"）|
+| 🚀 **多级缓存 + 限流** | Redis 缓存（按 thinking 模式分桶，含空值防穿透）+ slowapi 令牌桶限流 |
+| 🚫 **内容去重** | sha256 文件指纹，用户内去重，重复上传直接拒绝（省 embedding 算力）|
+| 📊 **上传进度** | XMLHttpRequest 真实进度条 + 超时处理 + 重复文档友好提示 |
 | 🔐 **JWT 认证** | 注册/登录、数据按用户隔离 |
 | 📃 **游标分页** | 文档列表与对话历史均用 cursor 分页，无深分页性能问题 |
 
@@ -25,12 +30,36 @@
 ```
 后端      FastAPI · LangGraph · SQLAlchemy · Pydantic v2
 RAG       ChromaDB · FlagEmbedding (bge-m3 / bge-reranker-v2-m3)
+LLM       langchain-deepseek（原生 reasoning_content 流式捕获）
+解析      pymupdf4llm（PDF 版面感知）· MarkItDown（DOCX，mammoth 底层）
+分块      langchain-text-splitters（MarkdownHeader / RecursiveCharacter）
 缓存/限流 Redis · slowapi
 存储      SQLite (aiosqlite)
-LLM       OpenAI 兼容接口（默认 DeepSeek，可切换 OpenAI / Ollama）
-前端      原生 HTML + JS + Bootstrap 5 · marked.js · highlight.js
+前端      原生 HTML + JS + Bootstrap 5 · marked.js · DOMPurify · highlight.js
 包管理    uv · Python 3.12
 ```
+
+---
+
+## 🧩 分块策略（可配置切换）
+
+通过 `.env` 的 `SPLIT_STRATEGY` 切换，无需改代码。默认 `auto`。
+
+| 策略 | 原理 | 适用场景 |
+|------|------|---------|
+| **auto**（默认）| 按文件类型路由：`md→markdown`，`pdf/docx→recursive` | 大多数情况 |
+| **markdown** | 两阶段：先按 `#/##/###` 标题切子节保结构，再对超长节递归切控长度 | 有清晰层级的文档（简历、报告、论文）|
+| **recursive** | 递归尝试分隔符（段落→换行→句号→空格）切，兼顾语义边界与长度 | 通用场景、转换后标题不规整的 PDF/DOCX |
+| **fixed** | 定长字符滑窗（带重叠），最简单但可能切断句子/表格 | 兜底/对照基准 |
+
+**配置优先级**：`.env` 显式设置 > auto 按类型路由
+
+**auto 路由设计依据**：
+- 原生 `.md` 文件标题结构最完整，markdown 策略优势最大
+- `pdf`/`docx` 经 pymupdf4llm/MarkItDown 转换后，标题层级按字号推断可能不规整，recursive 更稳健
+- `fixed` 在任何场景都不如 recursive（recursive 最差情况退化为 fixed），故不作为自动选项
+
+> 实现见 `app/services/text_splitter.py`，测试见 `tests/test_chunking.py`（15 个用例）。
 
 ---
 
@@ -83,10 +112,10 @@ uv sync
 创建 `.env` 文件（参考 `.env.example`，关键字段）：
 
 ```dotenv
-# LLM（OpenAI 兼容接口）
+# LLM（DeepSeek，通过 langchain-deepseek 接入）
 LLM_BASE_URL=https://api.deepseek.com
 LLM_API_KEY=sk-xxxxxxxx
-LLM_MODEL=deepseek-chat
+LLM_MODEL=deepseek-v4-flash
 
 # 数据库与缓存
 DATABASE_URL=sqlite+aiosqlite:///./data/docqa.db
@@ -101,12 +130,15 @@ JWT_EXPIRE_MINUTES=1440
 EMBEDDING_MODEL_PATH=./models/bge-m3
 RERANK_MODEL_PATH=./models/bge-reranker-v2-m3
 
-# RAG 参数
+# 分块与检索参数
 CHUNK_SIZE=500
 CHUNK_OVERLAP=100
+SPLIT_STRATEGY=auto
 RETRIEVE_TOP_K=20
 RERANK_TOP_K=3
 ```
+
+> 💡 **深度思考**：前端对话页有"深度思考"开关，开启后通过 DeepSeek `thinking` 模式输出推理过程（可折叠查看）。这是请求级开关，无需配置。
 
 ### 4. 启动 Redis
 
@@ -206,6 +238,10 @@ uv run pytest
 | stage-3 | RAG Agent 与 SSE 流式对话 | ✅ |
 | stage-4 | Redis 多级缓存 + slowapi 限流 | ✅ |
 | stage-5 | 前端页面（落地/登录/文档/对话）| ✅ |
+| stage-5 | langchain-deepseek + thinking 模式 + reasoning 折叠 | ✅ |
+| stage-5 | 多轮上下文（5 轮）+ 来源标注 + 意图路由 | ✅ |
+| stage-5 | 多策略分块（auto/markdown/recursive/fixed）| ✅ |
+| stage-5 | 内容去重（sha256）+ 上传进度条 + 超时 | ✅ |
 | stage-5 | Docker 容器化部署 | ⏳ |
 
 ---

@@ -111,17 +111,3 @@ def test_auto_routes_docx_to_recursive():
     chunks = split_text(text, strategy="auto", chunk_size=100, chunk_overlap=20, ext="docx")
     assert len(chunks) >= 1
 
-
-def test_auto_unknown_ext_falls_back_to_recursive():
-    """auto 策略：未知扩展名兜底走 recursive"""
-    text = "测试文本。" * 30
-    chunks = split_text(text, strategy="auto", chunk_size=100, chunk_overlap=20, ext="txt")
-    assert len(chunks) >= 1
-
-
-def test_auto_without_ext_falls_back_to_recursive():
-    """auto 策略：无 ext 参数兜底走 recursive"""
-    text = "测试文本。" * 30
-    chunks = split_text(text, strategy="auto", chunk_size=100, chunk_overlap=20)
-    assert len(chunks) >= 1
-
