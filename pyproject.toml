@@ -29,9 +29,25 @@ dependencies = [
     "slowapi>=0.1.9",
     "sqlalchemy>=2",
     "sse-starlette>=3.4.4",
+    "torch==2.12.0+cu126",
     "transformers>=4.44,<5",
     "uvicorn[standard]>=0.49.0",
 ]
+
+# ============================================================================
+# Torch 安装说明（本地 GPU vs 生产 CPU）
+# ----------------------------------------------------------------------------
+# flagembedding 传递依赖 torch，默认从 PyPI 装 CPU 版（torch==2.12.0+cpu）。
+# 本地开发机有 NVIDIA GPU 时，装 CUDA 版可让 BGE-M3 encode 提速 ~100 倍：
+#
+#   # 装好后 uv run 不会再尝试重装 CPU 版（lockfile 与 venv 一致）
+#   uv add torch==2.12.0+cu126 \
+#     --index-url https://download.pytorch.org/whl/cu126 \
+#     --index-strategy unsafe-best-match
+#
+# 生产环境（Docker，通常无 GPU）保持默认 CPU 版即可，无需额外操作。
+# 代码已做 device 自适应（embedding_service._select_device），有无 GPU 都能跑。
+# ============================================================================
 
 [dependency-groups]
 dev = [
@@ -39,3 +55,24 @@ dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=1.4.0",
 ]
+
+# ============================================================================
+# Torch 来源：本地开发用 CUDA 版（GPU 加速），生产用 CPU 版
+# ----------------------------------------------------------------------------
+# 默认 PyPI 源换为清华镜像（uv 全量解析走国内，避免超时）。
+# torch 指向 PyTorch 官方 cu126 索引（GPU 版）。
+# 生产 Docker 部署时，注释掉 [tool.uv.sources] 的 torch 行即可回退 CPU 版
+# （flagembedding 传递依赖会自动从默认源装 torch==2.12.0+cpu）。
+# ============================================================================
+[[tool.uv.index]]
+name = "pypi-tuna"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple/"
+default = true
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }

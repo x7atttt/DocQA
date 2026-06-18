@@ -168,21 +168,53 @@ def _build_rag_prompt(question: str, context_docs: list[str], history: list[dict
     return messages
 
 
+def _build_fallback_prompt(question: str, context_docs: list[str], history: list[dict] | None = None) -> list:
+    """检索无直接命中时的降级 prompt：结合文档背景 + 常识给出有帮助的回答。
+
+    与严格 RAG 的区别：允许模型在"文档未直接回答"时，基于文档提供的背景信息
+    （如简历内容、项目描述）+ 通用知识给出建议/分析，而不是硬拒绝。
+    典型场景：用户上传简历后问"怎么改进我的简历"——文档里有简历内容，
+    但没有现成的改进建议，此时应结合简历实际情况给针对性建议。
+    """
+    context = "\n\n---\n\n".join(context_docs) if context_docs else "(用户未上传相关文档)"
+    system = (
+        "你是一个智能助手。用户上传了以下文档作为参考背景。\n"
+        "请根据用户问题作答：\n"
+        "1) 若问题能从文档直接找到答案，请基于文档内容回答；\n"
+        "2) 若文档未直接涉及该问题（如询问建议、评价、改进方案），请结合文档中可见的实际情况"
+        "（如简历内容、项目细节）与你的通用知识，给出具体、有针对性的回答；\n"
+        "3) 回答开头用一句话说明依据来源（如『基于您上传的简历内容』或『文档未直接涉及，以下为通用建议』）；\n"
+        "4) 简洁专业，中文回答。"
+    )
+    user = f"文档背景：\n{context}\n\n用户问题：{question}"
+    messages = [SystemMessage(content=system)]
+    if history:
+        messages.extend(_history_to_messages(history))
+    messages.append(HumanMessage(content=user))
+    return messages
+
+
 async def generate_answer(state: AgentState) -> AgentState:
     question = state["question"]
     docs = state.get("retrieved_docs", [])
+    sources = state.get("sources", [])
     history = state.get("history", [])
     thinking = bool(state.get("thinking", False))
 
-    if not docs:
-        state["answer"] = "根据当前文档无法回答该问题。"
-        state["answer_tokens"] = [state["answer"]]
-        return state
+    # 根据检索结果相关度选择 prompt 策略：
+    # - 高相关（top score ≥ 0.5）：严格 RAG，仅基于文档回答
+    # - 低相关 / 无结果：降级 fallback，结合文档背景 + 常识给有帮助的回答
+    #   典型场景：用户上传简历后问"怎么改进简历"——文档有简历内容但无现成建议，
+    #   严格 RAG 会硬拒绝，fallback 让模型结合简历实际情况给针对性建议。
+    top_score = sources[0].get("score", 0) if sources else 0
+    if docs and top_score >= 0.5:
+        messages = _build_rag_prompt(question, docs, history)
+    else:
+        messages = _build_fallback_prompt(question, docs, history)
 
     # ChatDeepSeek 原生支持 reasoning_content，thinking 模式下流式 reasoning 会
     # 出现在 chunk.additional_kwargs['reasoning_content']，由 chat_service 捕获
     llm = get_llm(streaming=True, thinking=thinking)
-    messages = _build_rag_prompt(question, docs, history)
 
     tokens: list[str] = []
     async for chunk in llm.astream(messages):
