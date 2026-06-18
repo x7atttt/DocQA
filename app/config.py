@@ -21,6 +21,12 @@ class Settings(BaseSettings):
 
     embedding_model_path: str = "./models/bge-m3"
     rerank_model_path: str = "./models/bge-reranker-v2-m3"
+    # BGE-M3 encode 的 max_length（token）。应与 chunk_size 对齐：
+    # chunk 默认 500 字符 ≈ 400-500 token，故 512 足够。
+    # 设大了（如 8192）会让 CPU 推理极慢，GPU 也浪费算力。
+    embedding_max_length: int = 512
+    # Reranker 的 max_length（token）。query+chunk 拼接，768 较稳妥。
+    rerank_max_length: int = 768
 
     chunk_size: int = 500
     chunk_overlap: int = 100

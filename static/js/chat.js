@@ -155,16 +155,21 @@
             if (m.role === "user") {
                 appendUserMsg(m.content);
             } else {
-                const { contentEl, reasoningBox, reasoningEl, sourcesArea } = createAssistantMsg();
+                const { contentEl, reasoningBox, reasoningEl, sourcesArea, reasoningHint } = createAssistantMsg();
                 // 渲染完整答案
                 contentEl.innerHTML = renderMarkdown(m.content);
                 contentEl.querySelectorAll("pre code").forEach((b) => {
                     if (window.hljs) try { window.hljs.highlightElement(b); } catch {}
                 });
-                // 推理过程（如有）
+                // 推理过程（如有）：历史消息默认折叠，避免占用大量纵向空间
                 if (m.reasoning) {
                     reasoningEl.innerHTML = `<pre class="reasoning-pre">${escapeHtml(m.reasoning)}</pre>`;
                     reasoningBox.style.display = "block";
+                    reasoningBox.open = false;
+                    if (reasoningHint) reasoningHint.textContent = "点击展开/收起";
+                } else {
+                    // 无推理内容则隐藏面板
+                    reasoningBox.style.display = "none";
                 }
                 // 来源（如有）
                 if (m.sources && m.sources.length) {
@@ -245,10 +250,10 @@
         row.innerHTML = `
             <div class="bubble assistant-bubble">
                 <div class="sources-area mb-2"></div>
-                <details class="reasoning-panel mb-2" style="display:none">
+                <details class="reasoning-panel mb-2" style="display:none" open>
                     <summary class="reasoning-summary">
                         <i class="bi bi-lightbulb me-1"></i>推理过程
-                        <span class="reasoning-hint small text-muted ms-1">点击展开/收起</span>
+                        <span class="reasoning-hint small text-muted ms-1">思考中...</span>
                     </summary>
                     <div class="reasoning-content mt-1"></div>
                 </details>
@@ -260,7 +265,8 @@
         const reasoningBox = row.querySelector(".reasoning-panel");
         const reasoningEl = row.querySelector(".reasoning-content");
         const sourcesArea = row.querySelector(".sources-area");
-        return { row, contentEl, reasoningBox, reasoningEl, sourcesArea };
+        const reasoningHint = row.querySelector(".reasoning-hint");
+        return { row, contentEl, reasoningBox, reasoningEl, sourcesArea, reasoningHint };
     }
 
     function renderMarkdownHighlight(html) {
@@ -332,9 +338,10 @@
 
         appendUserMsg(question);
 
-        const { contentEl, reasoningBox, reasoningEl, sourcesArea } = createAssistantMsg();
+        const { contentEl, reasoningBox, reasoningEl, sourcesArea, reasoningHint } = createAssistantMsg();
         let fullAnswer = "";
         let fullReasoning = "";
+        let reasoningDone = false; // 推理完成（收到首个 token）后自动收起面板
 
         function updateContent() {
             contentEl.innerHTML = renderMarkdown(fullAnswer) + `<span class="typing-cursor"></span>`;
@@ -346,6 +353,8 @@
             // 推理内容用纯文本 + 换行保留（不渲染 markdown，避免与正文混淆）
             reasoningEl.innerHTML = `<pre class="reasoning-pre">${escapeHtml(fullReasoning)}</pre>`;
             reasoningBox.style.display = "block";
+            // 流式中保持展开，让用户看到思考过程在增长（避免误以为"卡住无输出"）
+            if (!reasoningDone) reasoningBox.open = true;
             scrollToBottom();
         }
 
@@ -363,6 +372,12 @@
                 if (statusHint.textContent === "正在检索文档...") statusHint.textContent = "正在推理...";
             },
             token: (raw) => {
+                // 首个正式 token 到达 → 推理阶段结束，收起推理面板，让正文成为焦点
+                if (!reasoningDone && fullAnswer === "") {
+                    reasoningDone = true;
+                    reasoningBox.open = false;
+                    if (reasoningHint) reasoningHint.textContent = "点击展开/收起";
+                }
                 fullAnswer += raw;
                 updateContent();
                 if (statusHint.textContent === "正在检索文档..." || statusHint.textContent === "正在推理...") {
@@ -389,6 +404,14 @@
                     if (obj.cache === "hit") cacheTag = " · 缓存命中";
                     else if (obj.cache === "wait") cacheTag = " · 缓存等待命中";
                 } catch {}
+                // 流结束：若从未产生正式 token（纯思考/异常），保持面板展开让用户看到思考；
+                // 已生成答案则收起，并把提示文案改回静态
+                if (fullAnswer && !reasoningDone) {
+                    reasoningBox.open = false;
+                    if (reasoningHint) reasoningHint.textContent = "点击展开/收起";
+                } else if (reasoningHint && fullReasoning) {
+                    reasoningHint.textContent = "点击展开/收起";
+                }
                 statusHint.textContent = `完成${cacheTag}`;
             },
             error: (raw) => {
