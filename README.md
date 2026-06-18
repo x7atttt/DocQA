@@ -286,27 +286,6 @@ curl http://localhost:8000/health
 
 ---
 
-## 📌 开发阶段
-
-| 阶段 | 内容 | 状态 |
-|------|------|------|
-| stage-1 | 基础骨架与 JWT 认证 | ✅ |
-| stage-2 | 文档上传与向量入库 | ✅ |
-| stage-3 | RAG Agent 与 SSE 流式对话 | ✅ |
-| stage-4 | Redis 多级缓存 + slowapi 限流 | ✅ |
-| stage-5 | 前端页面（落地/登录/文档/对话）| ✅ |
-| stage-5 | langchain-deepseek + thinking 模式 + reasoning 折叠 | ✅ |
-| stage-5 | 多轮上下文（5 轮）+ 来源标注 + 意图路由 | ✅ |
-| stage-5 | 多策略分块（auto/markdown/recursive/fixed）| ✅ |
-| stage-5 | 内容去重（sha256）+ 上传进度条 + 超时 | ✅ |
-| stage-5 | 多会话管理（侧边栏/新建/切换/删除/上限10）| ✅ |
-| stage-5 | Docker 容器化部署（gunicorn + uvicorn worker）| ✅ |
-| stage-6 | GPU 加速（device 自适应 + cu126 torch）| ✅ |
-| stage-6 | 检索降级回答（低相关 → 文档背景 + 常识）| ✅ |
-| stage-6 | 推理面板流式自动展开 + 前端体验优化 | ✅ |
-
----
-
 ## 📝 License
 
 [MIT](LICENSE)
