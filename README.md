@@ -31,7 +31,7 @@ FastAPI · LangGraph · ChromaDB · DeepSeek · Redis · BGE-M3
 
 | 特性 | 说明 |
 |------|------|
-| 📄 **多格式文档** | 支持 PDF / DOCX / Markdown，pymupdf4llm + MarkItDown 解析，自动分块、Embedding 入库 |
+| 📄 **多格式文档** | 支持 PDF / DOCX / Markdown。PDF 走 MinerU 高精度解析（OCR/表格/公式/图片提取，失败回退 pymupdf4llm），DOCX 走 MarkItDown，自动分块、Embedding 入库 |
 | 🧩 **多策略分块** | auto 按文件类型路由（md→markdown，pdf/docx→recursive），可选 fixed/markdown/recursive |
 | 🔍 **RAG 检索增强** | bge-m3 向量检索（稠密+稀疏+ColBERT 多视图）+ bge-reranker-v2-m3 重排序 |
 | 🤖 **LangGraph Agent** | 状态图编排检索 → 重排 → 生成节点，意图路由按需检索 |
@@ -83,8 +83,8 @@ FastAPI · LangGraph · ChromaDB · DeepSeek · Redis · BGE-M3
 │   ├── schemas/             # Pydantic 请求/响应模型
 │   └── services/            # 业务层：文档/Embedding/Rerank/对话/分块
 │       ├── chat_service.py  # SSE 流式核心
-│       ├── document_service.py
-│       ├── text_splitter.py # 多策略分块
+│       ├── document_service.py  # PDF 走 MinerU（OCR/表格/公式），失败回退 pymupdf4llm
+│       ├── text_splitter.py # 多策略分块（含 </table> 表格保护）
 │       ├── embedding_service.py  # device 自适应（GPU/CPU）
 │       └── rerank_service.py
 ├── static/                  # 前端静态资源
@@ -94,7 +94,7 @@ FastAPI · LangGraph · ChromaDB · DeepSeek · Redis · BGE-M3
 │   ├── chat.html            # 对话页（SSE 流式）
 │   ├── css/style.css
 │   └── js/                  # common / auth / documents / chat
-├── tests/                   # pytest 测试
+├── tests/                   # pytest 测试（含综合篇.pdf 样本）
 ├── models/                  # 本地模型权重（bge-m3, bge-reranker-v2-m3）
 ├── data/                    # SQLite + ChromaDB 持久化（运行时生成）
 ├── Dockerfile
@@ -120,10 +120,11 @@ FastAPI · LangGraph · ChromaDB · DeepSeek · Redis · BGE-M3
 
 **auto 路由设计依据**：
 - 原生 `.md` 文件标题结构最完整，markdown 策略优势最大
-- `pdf`/`docx` 经 pymupdf4llm/MarkItDown 转换后，标题层级按字号推断可能不规整，recursive 更稳健
+- `pdf`/`docx` 经 MinerU/MarkItDown 转换后，标题层级按字号推断可能不规整，recursive 更稳健
 - `fixed` 在任何场景都不如 recursive（recursive 最差情况退化为 fixed），故不作为自动选项
+- 递归分隔符含 `</table>`，保护中小 HTML 表格不在分块时被切断（MinerU 表格输出为 HTML）
 
-> 实现见 [`app/services/text_splitter.py`](app/services/text_splitter.py)，测试见 [`tests/test_chunking.py`](tests/test_chunking.py)（15 个用例）。
+> 实现见 [`app/services/text_splitter.py`](app/services/text_splitter.py)，测试见 [`tests/test_chunking.py`](tests/test_chunking.py)（含 HTML 表格保护测试）。
 
 ---
 

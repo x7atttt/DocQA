@@ -41,6 +41,15 @@ class Settings(BaseSettings):
     cache_ttl_seconds: int = 1800
     cache_null_ttl_seconds: int = 60
 
+    # ============ MinerU 文档解析 API（PDF 高精度解析：OCR/表格/公式）============
+    # 留空则 PDF 解析回退到本地 pymupdf4llm（不含 OCR/图片提取）
+    mineru_token: str = ""
+    mineru_base_url: str = "https://mineru.net/api/v4"
+    # pipeline=免费/CPU可跑（PP-OCRv6）；vlm=高精度需GPU算力
+    mineru_model_version: str = "pipeline"
+    # 轮询总超时（秒），超时自动回退 pymupdf4llm
+    mineru_timeout: int = 180
+
 
 @lru_cache
 def get_settings() -> Settings:

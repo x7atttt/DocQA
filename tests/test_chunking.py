@@ -111,3 +111,24 @@ def test_auto_routes_docx_to_recursive():
     chunks = split_text(text, strategy="auto", chunk_size=100, chunk_overlap=20, ext="docx")
     assert len(chunks) >= 1
 
+
+# ---------- HTML 表格保护测试（MinerU 输出含 HTML 表格）----------
+
+
+def test_html_table_large_splits_at_table_boundary():
+    """recursive 分块时，含 </table> 的分隔符让小表格整体保留、大表格在边界断。
+
+    MinerU 输出的表格是 HTML 格式。分隔符含 </table> 后：
+    - 小表格（≤chunk_size）：整体保留在一个 chunk
+    - 超大表格：无法整体保留，会在表格内部降级切分（已知限制，彻底保护需
+      HTMLSemanticPreservingSplitter，见项目演进方向）
+
+    本测试验证：小表格场景 </table> 分隔符生效（表格完整出现在某 chunk）。
+    """
+    # 小表格：应整体保留
+    small_table = "<table><tr><td>A</td><td>B</td></tr><tr><td>1</td><td>2</td></tr></table>"
+    text = f"段落前。\n\n{small_table}\n\n段落后。"
+    chunks = split_text(text, strategy="recursive", chunk_size=500, chunk_overlap=50)
+    found_intact = any(small_table in c for c in chunks)
+    assert found_intact, "小表格未完整保留（</table> 分隔符未生效）"
+

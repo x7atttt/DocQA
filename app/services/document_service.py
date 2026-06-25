@@ -1,8 +1,13 @@
 import asyncio
+import io
+import logging
 import os
+import time
 import uuid
+import zipfile
 
 import chromadb
+import requests
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -12,6 +17,7 @@ from app.models import Document
 from app.services.embedding_service import encode_texts
 
 settings = get_settings()
+logger = logging.getLogger("docqa.document")
 
 SUPPORTED_EXTS = {"pdf", "docx", "md"}
 
@@ -34,16 +40,98 @@ def get_user_collection(user_id: int) -> chromadb.Collection:
     )
 
 
-def _parse_pdf_sync(file_path: str) -> str:
+def _parse_pdf_pymupdf_sync(file_path: str) -> str:
     """用 pymupdf4llm 解析 PDF → Markdown（版面感知，保留表格/多栏顺序/标题层级）。
 
-    不含 OCR：扫描件（图片型 PDF）会返回空字符串，由上层报错提示。
-    如需 OCR 能力需额外安装 Tesseract 并启用 force_ocr。
+    作为 MinerU 不可用时的回退方案。不含 OCR：扫描件（图片型 PDF）会返回空字符串。
     """
     import pymupdf4llm
 
     md = pymupdf4llm.to_markdown(file_path)  # write_images 默认 False，不提取图片
     return md.strip()
+
+
+def _parse_pdf_mineru_sync(file_path: str) -> str:
+    """用 MinerU 云 API 解析 PDF → Markdown（含 OCR/表格/公式/页眉页脚去除）。
+
+    异步任务流程：申请上传 URL → PUT 上传到 OSS → 轮询任务状态 → 下载 zip → 取 .md。
+    失败抛异常，由上层 _parse_pdf_sync 捕获并回退 pymupdf4llm。
+
+    注意：MinerU 输出的表格是 HTML 格式（<table>），当前分块策略不专门处理，
+    可能在大表格中间切断（已知限制）。
+    """
+    token = settings.mineru_token
+    base = settings.mineru_base_url
+    headers = {"Authorization": f"Bearer {token}", "Accept": "*/*"}
+    file_name = os.path.basename(file_path)
+
+    # 1. 申请上传 URL（file-urls/batch）
+    resp = requests.post(
+        f"{base}/file-urls/batch",
+        headers={**headers, "Content-Type": "application/json"},
+        json={
+            "files": [{"name": file_name, "data_id": uuid.uuid4().hex[:12]}],
+            "model_version": settings.mineru_model_version,
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("code") != 0:
+        raise RuntimeError(f"MinerU 申请上传 URL 失败: {data.get('msg', data)}")
+    batch_id = data["data"]["batch_id"]
+    upload_url = data["data"]["file_urls"][0]
+
+    # 2. PUT 上传文件到 OSS（不带 Content-Type，避免签名不匹配）
+    with open(file_path, "rb") as f:
+        resp = requests.put(upload_url, data=f.read(), timeout=180)
+    if resp.status_code != 200:
+        raise RuntimeError(f"MinerU 文件上传失败: HTTP {resp.status_code}")
+
+    # 3. 轮询任务状态（每 5s，超时由 mineru_timeout 控制）
+    max_attempts = max(1, settings.mineru_timeout // 5)
+    for i in range(max_attempts):
+        resp = requests.get(f"{base}/extract-results/batch/{batch_id}", headers=headers, timeout=30)
+        resp.raise_for_status()
+        result = resp.json()
+        er = result.get("data", {}).get("extract_result", [])
+        status = er[0].get("state") if er else None
+        if status == "done":
+            zip_url = er[0].get("full_zip_url")
+            if not zip_url:
+                raise RuntimeError("MinerU 任务完成但无结果 URL")
+            break
+        if status in ("failed", "error"):
+            raise RuntimeError(f"MinerU 解析失败: {er[0].get('err_msg', status)}")
+        time.sleep(5)
+    else:
+        raise TimeoutError(f"MinerU 轮询超时（{settings.mineru_timeout}s）")
+
+    # 4. 下载 zip，解压取 .md 文件
+    resp = requests.get(zip_url, timeout=120)
+    resp.raise_for_status()
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        md_files = [n for n in zf.namelist() if n.endswith(".md")]
+        if not md_files:
+            raise RuntimeError("MinerU 结果 zip 中无 Markdown 文件")
+        md_content = zf.read(md_files[0]).decode("utf-8")
+
+    logger.info(f"MinerU 解析完成: {file_name} → {len(md_content)} 字符")
+    return md_content.strip()
+
+
+def _parse_pdf_sync(file_path: str) -> str:
+    """PDF 解析统一入口：优先 MinerU（OCR/表格/公式），失败回退 pymupdf4llm。
+
+    MinerU 是云服务，可能超时/限流/网络抖动；回退保证 PDF 解析始终可用。
+    无 mineru_token 时直接走 pymupdf4llm。
+    """
+    if settings.mineru_token:
+        try:
+            return _parse_pdf_mineru_sync(file_path)
+        except Exception as e:
+            logger.warning(f"MinerU 解析失败，回退 pymupdf4llm: {e}")
+    return _parse_pdf_pymupdf_sync(file_path)
 
 
 def _parse_docx_sync(file_path: str) -> str:
