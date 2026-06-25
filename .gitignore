@@ -61,8 +61,11 @@ test.py
 InduOCRBench/
 pdfQA-main/
 
-# 评测中间产物（eval_result.json 每次重跑会更新）
+# 评测中间产物（eval_result*.json / judge_cache 每次重跑会更新）
 tests/eval/eval_result.json
+tests/eval/eval_result_ocr.json
+tests/eval/eval_result_ocr_llmjudge.json
+tests/eval/judge_cache.jsonl
 
 # 评测用独立 Chroma 库
 data/chroma_eval/
