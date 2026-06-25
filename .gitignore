@@ -66,3 +66,7 @@ tests/eval/eval_result.json
 
 # 评测用独立 Chroma 库
 data/chroma_eval/
+data/chroma_eval_ocr/
+
+# MinerU 解析结果缓存（OCR→RAG 端到端评测用）
+data/ocr_md_cache/
