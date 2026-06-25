@@ -19,7 +19,10 @@ from langchain_text_splitters import (
 )
 
 # 中文友好的递归分隔符：优先按段落切，其次换行、句号、英文句号、空格
-_RECURSIVE_SEPARATORS = ["\n\n", "\n", "。", "！", "？", ".", "!", "?", " ", ""]
+# 含 </table>：MinerU 输出的 HTML 表格在递归切分时优先在表格结束处断开。
+# 对不超过 chunk_size 的表格可整体保留；超大表格仍会被切断（递归降级到次级分隔符）。
+# 彻底保护整个表格需用 HTMLSemanticPreservingSplitter（已记录为项目演进方向）。
+_RECURSIVE_SEPARATORS = ["\n\n", "</table>", "\n", "。", "！", "？", ".", "!", "?", " ", ""]
 
 # Markdown 标题层级 → metadata key 映射
 _MD_HEADERS = [("#", "h1"), ("##", "h2"), ("###", "h3")]
