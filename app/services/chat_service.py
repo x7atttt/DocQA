@@ -57,6 +57,7 @@ async def stream_graph(
     initial: AgentState = {
         "user_id": user_id,
         "question": question,
+        "rewritten_query": "",
         "history": history or [],
         "thinking": thinking,
         "should_retrieve": False,

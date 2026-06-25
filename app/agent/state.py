@@ -18,6 +18,8 @@ class HistoryItem(TypedDict):
 class AgentState(TypedDict, total=False):
     user_id: int
     question: str
+    # query 改写：多轮指代消解后的检索 query（仅检索用，生成仍用原始 question）
+    rewritten_query: str
     # 意图路由
     should_retrieve: bool
     # 检索

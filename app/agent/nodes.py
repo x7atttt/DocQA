@@ -96,6 +96,60 @@ async def intent_router(state: AgentState) -> AgentState:
     return state
 
 
+async def rewrite_query(state: AgentState) -> AgentState:
+    """多轮指代消解：结合历史把指代词改写成可独立检索的完整 query。
+
+    场景：用户上一轮问"文档里有哪些规则"，这一轮问"第三条是什么"，
+    直接用"第三条"检索必然失败。本节点把"第三条"结合历史改写成
+    "文档里第3条规则的具体内容"。
+
+    设计：
+    - 仅当 history 非空才调 LLM 改写（首问无历史，省一次调用）
+    - 改写结果存 rewritten_query，供 retrieve_documents 使用
+    - 生成答案仍用原始 question（回答自然，用户问的是原话）
+    - 容错：LLM 异常/输出异常时降级用原始 question，不阻断流程
+    """
+    question = state["question"]
+    history = state.get("history", [])
+
+    # 无历史 → 无指代可消解，直接用原问题
+    if not history:
+        state["rewritten_query"] = question
+        return state
+
+    try:
+        llm = get_llm()
+        # 把历史拼成对话格式（最多最近 3 轮，够消解指代又省 token）
+        recent = history[-6:]  # 3 轮 = 6 条消息
+        dialogue = "\n".join(
+            f"{'用户' if h['role'] == 'user' else '助手'}: {h['content'][:200]}"
+            for h in recent
+            if h.get("content")
+        )
+        messages = [
+            SystemMessage(
+                content=(
+                    "你是 query 改写助手。根据对话历史，把用户的最新问题改写成一个"
+                    "可以独立检索的完整问题（消解指代词如 它/这个/第几条/上面提到）。\n"
+                    "要求：\n"
+                    "1) 只输出改写后的问题，不要任何解释；\n"
+                    "2) 保持原意，不要添加无关内容；\n"
+                    "3) 如果问题本身已完整无指代，原样输出。"
+                )
+            ),
+            HumanMessage(content=f"对话历史：\n{dialogue}\n\n最新问题：{question}\n\n改写后："),
+        ]
+        resp = await llm.ainvoke(messages)
+        # 去除首尾可能的多余引号/句号（LLM 有时会用引号包裹改写结果）
+        # 含中文弯引号 “ ” ‘ ’
+        rewritten = resp.content.strip().strip("\"'“”‘’。")
+        state["rewritten_query"] = rewritten or question
+    except Exception:
+        # 改写失败不阻断检索，降级用原始问题
+        state["rewritten_query"] = question
+    return state
+
+
 def _rrf_fuse(
     dense_rank: list[int], sparse_rank: list[int], k: int
 ) -> list[int]:
@@ -127,12 +181,14 @@ async def retrieve_documents(state: AgentState) -> AgentState:
     把"字面没对上但语义相关"和"字面正好对上"两类命中都纳入候选。
     """
     question = state["question"]
+    # 检索用改写后的 query（指代消解），生成答案时仍用原始 question
+    search_query = state.get("rewritten_query") or question
     user_id = state["user_id"]
 
     collection = get_user_collection(user_id)
 
     # 1. query 双编码：dense + sparse
-    query_enc = await encode_query_full(question)
+    query_enc = await encode_query_full(search_query)
     query_vec = query_enc["dense"]
     query_sparse = query_enc["sparse"]
 
@@ -164,8 +220,8 @@ async def retrieve_documents(state: AgentState) -> AgentState:
     fused_candidates = [candidates[i] for i in top_idxs]
     fused_metas = [metadatas[i] for i in top_idxs]
 
-    # 5. reranker 精排
-    top_pairs = await rerank(question, fused_candidates, top_k=settings.rerank_top_k)
+    # 5. reranker 精排（用改写后的 query，与召回保持一致）
+    top_pairs = await rerank(search_query, fused_candidates, top_k=settings.rerank_top_k)
 
     retrieved_docs: list[str] = []
     sources = []
