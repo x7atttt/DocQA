@@ -18,11 +18,11 @@ FastAPI · LangGraph · ChromaDB · DeepSeek · Redis · BGE-M3
 - [🛠 技术栈](#-技术栈)
 - [📁 项目结构](#-项目结构)
 - [🧩 分块策略](#-分块策略可配置切换)
+- [🔍 检索与评测](#-检索与评测)
 - [🚀 快速开始](#-快速开始)
 - [📡 API 概览](#-api-概览)
 - [🧪 测试](#-测试)
 - [📦 部署](#-部署)
-- [📌 开发阶段](#-开发阶段)
 - [📝 License](#-license)
 
 ---
@@ -33,13 +33,13 @@ FastAPI · LangGraph · ChromaDB · DeepSeek · Redis · BGE-M3
 |------|------|
 | 📄 **多格式文档** | 支持 PDF / DOCX / Markdown。PDF 走 MinerU 高精度解析（OCR/表格/公式/图片提取，失败回退 pymupdf4llm），DOCX 走 MarkItDown，自动分块、Embedding 入库 |
 | 🧩 **多策略分块** | auto 按文件类型路由（md→markdown，pdf/docx→recursive），可选 fixed/markdown/recursive |
-| 🔍 **RAG 检索增强** | bge-m3 向量检索（稠密+稀疏+ColBERT 多视图）+ bge-reranker-v2-m3 重排序 |
-| 🤖 **LangGraph Agent** | 状态图编排检索 → 重排 → 生成节点，意图路由按需检索 |
+| 🔍 **RAG 检索增强** | BGE-M3 向量检索（dense+sparse RRF 混合召回）+ BGE-Reranker-v2-M3 交叉编码器精排 |
+| 🤖 **LangGraph Agent** | 状态图编排"意图判断 → query 改写 → 检索 → 生成"链路，意图路由按需检索 |
 | 💬 **多会话管理** | 侧边栏会话列表，新建/切换/删除，每用户上限 10 个，首问自动生成标题 |
-| 💡 **深度思考模式** | DeepSeek thinking 开关，推理过程可折叠查看（langchain-deepseek 原生 reasoning_content）|
+| 💡 **深度思考模式** | DeepSeek thinking 开关，显式控制思考模式启停，推理过程可折叠查看 |
 | ⚡ **SSE 流式输出** | Server-Sent Events 实时打字机效果，推理面板自动展开、答案逐字呈现 |
 | 🧠 **智能降级回答** | 检索低相关/无命中时降级为「文档背景 + 常识」回答，泛化问题（如「怎么改进简历」）不再硬拒绝 |
-| 🔁 **多轮上下文** | 保留当前会话最近 5 轮历史，支持指代理解（"它""上面那个"）|
+| 🔁 **多轮上下文 + query 改写** | 保留会话最近 5 轮历史，检索前 LLM 改写指代词（"它""第三条"→ 完整问题），解决多轮指代检索失效 |
 | 🚀 **GPU 加速** | 自动检测 CUDA，BGE-M3/Reranker 在 GPU 上推理（encode 17 chunks：21.5s → 0.2s）|
 | 🔐 **JWT 认证** | 注册/登录、数据按用户隔离 |
 | 🚀 **多级缓存 + 限流** | Redis 缓存（按会话+thinking 模式分桶隔离，含空值防穿透）+ slowapi 令牌桶限流 |
@@ -54,8 +54,8 @@ FastAPI · LangGraph · ChromaDB · DeepSeek · Redis · BGE-M3
 | 层 | 技术 |
 |------|------|
 | **后端** | FastAPI · LangGraph · SQLAlchemy · Pydantic v2 |
-| **RAG** | ChromaDB · FlagEmbedding (bge-m3 / bge-reranker-v2-m3) |
-| **LLM** | langchain-deepseek（原生 reasoning_content 流式捕获）|
+| **RAG** | ChromaDB · FlagEmbedding（BGE-M3 稠密+稀疏向量 / BGE-Reranker-v2-M3 精排）|
+| **LLM** | DeepSeek（OpenAI SDK 直连，兼容 OpenAI 格式，reasoning_content 自取）|
 | **解析** | MinerU 云 API（PDF: OCR/表格/公式/图片，失败回退 pymupdf4llm）· MarkItDown（DOCX）|
 | **分块** | langchain-text-splitters（MarkdownHeader / RecursiveCharacter）|
 | **缓存/限流** | Redis · slowapi |
@@ -75,17 +75,18 @@ FastAPI · LangGraph · ChromaDB · DeepSeek · Redis · BGE-M3
 │   ├── config.py            # 配置（pydantic-settings）
 │   ├── api/                 # 路由层：auth / documents / chat
 │   ├── agent/               # LangGraph 状态图与节点编排
-│   │   ├── graph.py         # 状态图定义（检索→重排→生成）
-│   │   ├── nodes.py         # 节点实现（含降级回答分流）
+│   │   ├── graph.py         # 状态图定义（意图判断→改写→检索→生成）
+│   │   ├── nodes.py         # 节点实现（query改写/混合检索/降级分流）
 │   │   └── state.py         # Agent 状态定义
 │   ├── core/                # 安全/缓存/限流/响应/异常/数据库
 │   ├── models/              # SQLAlchemy 模型（user/document/conversation）
 │   ├── schemas/             # Pydantic 请求/响应模型
-│   └── services/            # 业务层：文档/Embedding/Rerank/对话/分块
-│       ├── chat_service.py  # SSE 流式核心
+│   └── services/            # 业务层：文档/Embedding/Rerank/对话/分块/LLM
+│       ├── chat_service.py  # SSE 流式核心（手动编排节点 + OpenAI SDK 流式）
+│       ├── llm_provider.py  # LLM Provider 层（OpenAI SDK 直连，thinking 开关）
 │       ├── document_service.py  # PDF 走 MinerU（OCR/表格/公式），失败回退 pymupdf4llm
 │       ├── text_splitter.py # 多策略分块（含 </table> 表格保护）
-│       ├── embedding_service.py  # device 自适应（GPU/CPU）
+│       ├── embedding_service.py  # BGE-M3（dense+sparse 双编码，device 自适应）
 │       └── rerank_service.py
 ├── static/                  # 前端静态资源
 │   ├── index.html           # 落地页
@@ -128,6 +129,36 @@ FastAPI · LangGraph · ChromaDB · DeepSeek · Redis · BGE-M3
 
 ---
 
+## 🔍 检索与评测
+
+### 检索架构（两阶段）
+
+```
+用户问题
+  ↓ (query 改写：多轮指代消解)
+BGE-M3 向量召回 Top-20（dense HNSW + sparse lexical RRF 混合融合）
+  ↓
+BGE-Reranker-v2-M3 交叉编码器精排 Top-3
+  ↓
+喂给 LLM 生成答案
+```
+
+- **召回**：BGE-M3 同时编码 dense 向量与 sparse lexical_weights，两路用 RRF（Reciprocal Rank Fusion）融合
+- **精排**：BGE-Reranker cross-encoder 对候选独立打分重排，是检索质量的核心保障
+
+### 评测体系（InduOCRBench）
+
+基于 [qihoo360/InduOCRBench](https://huggingface.co/datasets/qihoo360/InduOCRBench) 中文企业文档评测集（12 行业 / 570 份 PDF / 2071 题）实测，详细记录见 [`rag指标记录.md`](rag指标记录.md)。
+
+| 评测层 | 指标 | 结果 | 说明 |
+|--------|------|:----:|------|
+| 检索层（标准标注）| Hit@3 / MRR | **94% / 0.857** | 纯检索链路（rerank 精排使 MRR +12.9%）|
+| 检索层（OCR→检索）| Hit@3 | **71%** | 含 MinerU 解析损耗（LLM-as-judge 判定）|
+
+评测脚本在 `tests/eval/`，包含检索召回评测与 OCR→检索链路评测。
+
+---
+
 ## 🚀 快速开始
 
 ### 1. 环境准备
@@ -155,7 +186,7 @@ uv sync
 创建 `.env` 文件（参考 [`.env.example`](.env.example)，关键字段）：
 
 ```dotenv
-# LLM（DeepSeek，通过 langchain-deepseek 接入）
+# LLM（DeepSeek，通过 OpenAI SDK 兼容接口直连）
 LLM_BASE_URL=https://api.deepseek.com
 LLM_API_KEY=sk-xxxxxxxx
 LLM_MODEL=deepseek-v4-flash
@@ -184,7 +215,7 @@ RERANK_TOP_K=3
 MAX_CONVERSATIONS=10
 ```
 
-> 💡 **深度思考**：前端对话页有"深度思考"开关，开启后通过 DeepSeek `thinking` 模式输出推理过程（可折叠查看）。这是请求级开关，无需配置。
+> 💡 **深度思考**：前端对话页有"深度思考"开关，开启后通过 DeepSeek `thinking` 模式输出推理过程（可折叠查看）。关闭时显式禁用思考模式（`deepseek-v4-flash` 默认开启思考，需显式 disabled），确保开关真正生效。这是请求级开关，无需配置。
 
 ### 4. 启动 Redis
 
