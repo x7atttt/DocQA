@@ -14,6 +14,7 @@
 """
 
 from langchain_text_splitters import (
+    HTMLSemanticPreservingSplitter,
     MarkdownHeaderTextSplitter,
     RecursiveCharacterTextSplitter,
 )
@@ -29,9 +30,9 @@ _MD_HEADERS = [("#", "h1"), ("##", "h2"), ("###", "h3")]
 
 # auto 策略的文件类型 → 策略映射
 _AUTO_STRATEGY_MAP = {
-    "md": "markdown",     # 原生 Markdown，标题结构最完整
-    "pdf": "recursive",   # pymupdf4llm 转换的 md 标题层级可能不规整，recursive 更稳健
-    "docx": "recursive",  # MarkItDown 转换的同理
+    "md": "markdown",          # 原生 Markdown，标题结构最完整
+    "pdf": "html_preserve",    # MinerU 输出 HTML 表格，用表格保护避免超大表格被切
+    "docx": "recursive",       # MarkItDown 转 GFM 表格（非 HTML），走 recursive
 }
 
 
@@ -70,6 +71,8 @@ def split_text(
         chunks = _fixed_size_split(text, chunk_size, chunk_overlap)
     elif strategy == "markdown":
         chunks = _markdown_split(text, chunk_size, chunk_overlap)
+    elif strategy == "html_preserve":
+        chunks = _html_preserve_split(text, chunk_size, chunk_overlap)
     else:  # recursive（默认，未知策略也走 recursive）
         chunks = _recursive_split(text, chunk_size, chunk_overlap)
 
@@ -108,6 +111,38 @@ def _recursive_split(text: str, chunk_size: int, overlap: int) -> list[str]:
         keep_separator=True,  # 保留分隔符（如句号），避免块开头/结尾残缺
     )
     return splitter.split_text(text)
+
+
+def _html_preserve_split(text: str, chunk_size: int, overlap: int) -> list[str]:
+    """HTML 语义保留分块（硬保护表格不被切）。
+
+    用 HTMLSemanticPreservingSplitter 的 elements_to_preserve=["table"]，
+    硬保证表格整体保留在单一 chunk 内（即使超过 max_chunk_size 也不切）。
+    解决 recursive 的 `</table>` 分隔符只能保护中小表格、超大跨页表格仍被切的短板。
+
+    适用场景：PDF 经 MinerU 解析后输出 HTML <table>（保留 rowspan/colspan）。
+    DOCX 是 GFM 管道表格（非 HTML），不适用本策略。
+
+    关键 fallback：纯文本无 <table 标签时，HTMLSemanticPreservingSplitter 会返回空列表
+    （BeautifulSoup 解析纯文本 body 为 None），导致内容全丢。故检测到无 <table 时
+    降级走 recursive，保证无表格文档正常分块。
+
+    注意：保留的是表格的文本内容（get_text 串联），不保留 <tr><td> 标签结构。
+    但表格数据完整，LLM 能理解行列关系。如需保留 HTML 结构可用 custom_handlers 迭代。
+    """
+    # 无 <table → fallback recursive（否则空列表丢全部内容）
+    if "<table" not in text:
+        return _recursive_split(text, chunk_size, overlap)
+
+    splitter = HTMLSemanticPreservingSplitter(
+        headers_to_split_on=_MD_HEADERS,  # 必填，按 #/##/### 标题切节
+        max_chunk_size=chunk_size,        # 软上限：为保表格允许超出
+        chunk_overlap=overlap,
+        elements_to_preserve=["table"],   # 表格整体保留，即使超 max_chunk_size 也不切
+    )
+    docs = splitter.split_text(text)
+    # split_text 返回 list[Document]，适配成 list[str]
+    return [d.page_content for d in docs if d.page_content and d.page_content.strip()]
 
 
 def _markdown_split(text: str, chunk_size: int, overlap: int) -> list[str]:
