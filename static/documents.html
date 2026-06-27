@@ -34,9 +34,10 @@
                 <div id="dropZone" class="drop-zone text-center py-4">
                     <i class="bi bi-cloud-arrow-up fs-1 text-muted"></i>
                     <p class="mb-1 mt-2">拖拽文件到这里，或 <span class="text-primary fw-semibold">点击选择</span></p>
-                    <p class="text-muted small mb-0">支持 PDF / DOCX / MD，单个文件 ≤ 20MB</p>
-                    <input type="file" id="fileInput" class="d-none" accept=".pdf,.docx,.md">
+                    <p class="text-muted small mb-0">支持 PDF / DOCX / MD，可多选，单个文件 ≤ 20MB</p>
+                    <input type="file" id="fileInput" class="d-none" accept=".pdf,.docx,.md" multiple>
                 </div>
+                <!-- 批量上传进度区 -->
                 <div id="uploadProgress" class="mt-3 d-none">
                     <div class="d-flex justify-content-between small mb-1">
                         <span id="uploadFileName"></span>
@@ -45,6 +46,7 @@
                     <div class="progress" style="height: 6px;">
                         <div id="uploadBar" class="progress-bar" style="width: 0%; transition: width 0.2s ease;"></div>
                     </div>
+                    <div id="batchProgress" class="small text-muted mt-1 d-none"></div>
                 </div>
             </div>
         </div>
