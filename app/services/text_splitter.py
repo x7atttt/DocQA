@@ -130,8 +130,18 @@ def _html_preserve_split(text: str, chunk_size: int, overlap: int) -> list[str]:
     注意：保留的是表格的文本内容（get_text 串联），不保留 <tr><td> 标签结构。
     但表格数据完整，LLM 能理解行列关系。如需保留 HTML 结构可用 custom_handlers 迭代。
     """
-    # 无 <table → fallback recursive（否则空列表丢全部内容）
+    # 仅当内容确实以 HTML 结构为主（有 <table 且占比合理）才走 HTMLSemanticPreservingSplitter
+    # 否则 fallback recursive：HTMLSemanticPreservingSplitter 用 BeautifulSoup 解析，
+    # 对纯文本/混合内容会丢失大量内容（没有 <p> 包裹的文本被忽略）
     if "<table" not in text:
+        return _recursive_split(text, chunk_size, overlap)
+
+    # 估算 table 内容占总文本比例：太低说明是混合内容，table 只是片段
+    import re
+    table_chars = sum(len(t) for t in re.findall(r"<table[^>]*>.*?</table>", text, re.DOTALL))
+    total_chars = len(text)
+    # table 占比 < 30% → 大部分是正文，走 recursive 更安全（HTMLSemanticPreservingSplitter 会丢正文）
+    if total_chars > 0 and table_chars / total_chars < 0.3:
         return _recursive_split(text, chunk_size, overlap)
 
     splitter = HTMLSemanticPreservingSplitter(
@@ -141,8 +151,12 @@ def _html_preserve_split(text: str, chunk_size: int, overlap: int) -> list[str]:
         elements_to_preserve=["table"],   # 表格整体保留，即使超 max_chunk_size 也不切
     )
     docs = splitter.split_text(text)
-    # split_text 返回 list[Document]，适配成 list[str]
-    return [d.page_content for d in docs if d.page_content and d.page_content.strip()]
+    chunks = [d.page_content for d in docs if d.page_content and d.page_content.strip()]
+
+    # 兜底：HTMLSemanticPreservingSplitter 返回空（格式不规范的HTML）→ 降级 recursive
+    if not chunks:
+        return _recursive_split(text, chunk_size, overlap)
+    return chunks
 
 
 def _markdown_split(text: str, chunk_size: int, overlap: int) -> list[str]:
