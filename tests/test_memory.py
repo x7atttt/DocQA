@@ -10,6 +10,8 @@
 """
 
 from app.agent.memory import estimate_tokens, truncate_by_token_budget
+from app.agent.nodes import _build_rag_prompt, _inject_summary
+from langchain_core.messages import HumanMessage, SystemMessage
 
 
 def test_estimate_tokens_empty():
@@ -106,3 +108,56 @@ def test_truncate_keeps_latest_and_order():
     # 顺序正确：user/assistant 交替
     roles = [item["role"] for item in result]
     assert roles == ["user", "assistant", "user", "assistant", "user", "assistant"]
+
+
+# ============ 摘要注入测试 ============
+
+def test_inject_summary_no_summary_unchanged():
+    """无摘要时消息列表不变。"""
+    messages = [SystemMessage(content="sys"), HumanMessage(content="hi")]
+    result = _inject_summary(messages, None)
+    assert result == messages
+    assert len(result) == 2
+
+
+def test_inject_summary_empty_string_unchanged():
+    """空字符串摘要时消息列表不变。"""
+    messages = [SystemMessage(content="sys"), HumanMessage(content="hi")]
+    result = _inject_summary(messages, "")
+    assert len(result) == 2
+
+
+def test_inject_summary_inserts_after_first_system():
+    """有摘要时在首个 system 消息之后插入摘要 system 消息。"""
+    messages = [SystemMessage(content="你是助手"), HumanMessage(content="问题")]
+    summary = "本会话讨论了加密方案"
+    result = _inject_summary(messages, summary)
+    assert len(result) == 3
+    # 第一条仍是原 system
+    assert result[0].content == "你是助手"
+    # 第二条是摘要（含会话历史摘要标记）
+    assert "会话历史摘要" in result[1].content
+    assert summary in result[1].content
+    # 第三条是原 human
+    assert result[2].content == "问题"
+
+
+def test_inject_summary_prepends_when_no_leading_system():
+    """无前导 system 时摘要素描插到最前。"""
+    messages = [HumanMessage(content="问题")]
+    result = _inject_summary(messages, "摘要内容")
+    assert len(result) == 2
+    assert "会话历史摘要" in result[0].content
+
+
+def test_build_rag_prompt_with_summary():
+    """_build_rag_prompt 接受 summary 并正确注入。"""
+    messages = _build_rag_prompt(
+        question="第三条是什么",
+        context_docs=["文档内容1"],
+        history=[{"role": "user", "content": "上一问"}],
+        summary="历史摘要",
+    )
+    # 顺序：system → 摘要 system → 历史 human → 当前 human
+    assert len(messages) == 4
+    assert "历史摘要" in messages[1].content

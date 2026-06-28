@@ -210,7 +210,33 @@ def _history_to_messages(history: list[dict]) -> list:
     return msgs
 
 
-def _build_rag_prompt(question: str, context_docs: list[str], history: list[dict] | None = None) -> list:
+def _inject_summary(messages: list, summary: str | None) -> list:
+    """把会话摘要作为 system 上下文插入消息列表开头（system 之后、历史之前）。
+
+    摘要用于消解指代词、保持长对话连贯；回答仍以文档内容为准。
+    仅当 summary 非空时插入。
+    """
+    if not summary:
+        return messages
+    summary_msg = SystemMessage(
+        content=(
+            f"[会话历史摘要]\n{summary}\n\n"
+            "（以上为本会话早期对话的要点，用于理解指代与背景；"
+            "回答仍以本次提供的文档内容为准。）"
+        )
+    )
+    # 插在第一个 system 消息之后
+    if messages and isinstance(messages[0], SystemMessage):
+        return [messages[0], summary_msg] + messages[1:]
+    return [summary_msg] + messages
+
+
+def _build_rag_prompt(
+    question: str,
+    context_docs: list[str],
+    history: list[dict] | None = None,
+    summary: str | None = None,
+) -> list:
     context = "\n\n---\n\n".join(context_docs) if context_docs else "(无相关文档)"
     system = (
         "你是文档问答助手。基于以下文档内容回答用户问题。"
@@ -218,15 +244,20 @@ def _build_rag_prompt(question: str, context_docs: list[str], history: list[dict
         "3) 简洁专业，中文回答。"
     )
     user = f"文档内容：\n{context}\n\n用户问题：{question}"
-    # 消息顺序：system → 历史 → 当前 human（让模型理解指代与上下文）
+    # 消息顺序：system → [摘要] → 历史 → 当前 human（让模型理解指代与上下文）
     messages = [SystemMessage(content=system)]
     if history:
         messages.extend(_history_to_messages(history))
     messages.append(HumanMessage(content=user))
-    return messages
+    return _inject_summary(messages, summary)
 
 
-def _build_fallback_prompt(question: str, context_docs: list[str], history: list[dict] | None = None) -> list:
+def _build_fallback_prompt(
+    question: str,
+    context_docs: list[str],
+    history: list[dict] | None = None,
+    summary: str | None = None,
+) -> list:
     """检索无直接命中时的降级 prompt：结合文档背景 + 常识给出有帮助的回答。
 
     与严格 RAG 的区别：允许模型在"文档未直接回答"时，基于文档提供的背景信息
@@ -249,7 +280,7 @@ def _build_fallback_prompt(question: str, context_docs: list[str], history: list
     if history:
         messages.extend(_history_to_messages(history))
     messages.append(HumanMessage(content=user))
-    return messages
+    return _inject_summary(messages, summary)
 
 
 async def generate_answer(state: AgentState) -> AgentState:

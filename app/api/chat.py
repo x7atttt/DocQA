@@ -1,7 +1,7 @@
 import asyncio
 import json
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -53,6 +53,7 @@ def _stream_cached(cached: dict, cache_tag: str):
 @limiter.limit("100/minute")
 async def ask(
     request: Request,
+    background_tasks: BackgroundTasks,
     body: ChatAskRequest,
     user: User = Depends(get_current_user),
 ):
@@ -68,6 +69,8 @@ async def ask(
     # 取当前会话最近若干轮历史作为多轮上下文（正序：最旧在前）
     # 实际窗口由节点层按 token 预算 + 轮数截断
     history = await _load_recent_history(user_id, conversation_id)
+    # 加载会话摘要（长对话老上下文压缩），注入 system prompt 做长期记忆
+    summary = await _load_summary(conversation_id)
 
     # 缓存按会话隔离（key 含 conversation_id）
     hit, cached = await get_cached_answer(user_id, question, conversation_id)
@@ -101,7 +104,9 @@ async def ask(
         error_msg: str | None = None
 
         try:
-            async for event_name, payload in stream_graph(graph, user_id, question, history, thinking):
+            async for event_name, payload in stream_graph(
+                graph, user_id, question, history, thinking, summary
+            ):
                 yield sse(event_name, payload)
                 if event_name == "token":
                     answer_parts.append(payload)
@@ -130,6 +135,7 @@ async def ask(
                     sources=sources,
                     error_msg=error_msg,
                     lock_token=lock_token,
+                    background_tasks=background_tasks,
                     thinking=thinking,
                     conversation_id=conversation_id,
                 )
@@ -178,6 +184,18 @@ async def _load_recent_history(
         return []
 
 
+async def _load_summary(conversation_id: int | None) -> str | None:
+    """读取会话摘要（长对话老上下文压缩）。无会话或未生成摘要返回 None。"""
+    if conversation_id is None:
+        return None
+    try:
+        async with async_session_factory() as db:
+            conv = await db.get(Conversation, conversation_id)
+            return conv.summary if conv else None
+    except Exception:
+        return None
+
+
 async def _finalize(
     user_id: int,
     question: str,
@@ -186,6 +204,7 @@ async def _finalize(
     sources: list[dict],
     error_msg: str | None,
     lock_token: str | None,
+    background_tasks: BackgroundTasks | None = None,
     thinking: bool = False,
     conversation_id: int | None = None,
 ) -> None:
@@ -234,6 +253,12 @@ async def _finalize(
                 )
             )
             await db.commit()
+            # 消息落库后，异步判断是否需要生成/刷新会话摘要（达阈值才真正调 LLM）
+            # 放进 BackgroundTasks：用户已收到流式回答，摘要生成不阻塞请求
+            if background_tasks is not None:
+                from app.services.summary_service import maybe_generate_summary
+
+                background_tasks.add_task(maybe_generate_summary, conv_id)
     except Exception:
         pass
 

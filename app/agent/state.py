@@ -27,6 +27,8 @@ class AgentState(TypedDict, total=False):
     sources: list[SourceItem]
     # 多轮上下文：最近 N 轮历史（正序，最旧在前）
     history: list[HistoryItem]
+    # 会话摘要：长对话老上下文的压缩（达阈值异步生成），注入 system prompt 做长期记忆
+    summary: str
     # 是否开启 DeepSeek thinking 模式（用户自定义）
     thinking: bool
     # 答案

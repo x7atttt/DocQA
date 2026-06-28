@@ -22,6 +22,7 @@ async def stream_graph(
     question: str,
     history: list[dict] | None = None,
     thinking: bool = False,
+    summary: str | None = None,
 ) -> AsyncIterator[tuple[str, Any]]:
     """yield (event_name, payload). event ∈ reasoning/token/sources/done/error.
 
@@ -52,6 +53,7 @@ async def stream_graph(
         "question": question,
         "rewritten_query": "",
         "history": history or [],
+        "summary": summary or "",
         "thinking": thinking,
         "should_retrieve": False,
         "retrieved_docs": [],
@@ -90,17 +92,21 @@ async def stream_graph(
         # 3. 构造生成消息
         question_text = state["question"]
         history_list = state.get("history", [])
+        summary_text = state.get("summary") or None
         if state.get("should_retrieve"):
             docs = state.get("retrieved_docs", [])
             sources = state.get("sources", [])
             top_score = sources[0].get("score", 0) if sources else 0
             if docs and top_score >= 0.5:
-                messages = _build_rag_prompt(question_text, docs, history_list)
+                messages = _build_rag_prompt(question_text, docs, history_list, summary_text)
             else:
-                messages = _build_fallback_prompt(question_text, docs, history_list)
+                messages = _build_fallback_prompt(question_text, docs, history_list, summary_text)
         else:
-            # 纯对话（general_answer 路径）
+            # 纯对话（general_answer 路径）：摘要也注入，保持长对话连贯
             messages = _history_to_messages(history_list)
+            from app.agent.nodes import _inject_summary
+
+            messages = _inject_summary(messages, summary_text)
             messages.append(HumanMessage(content=question_text))
 
         # 4. 流式生成：直接用 OpenAI SDK 的 astream_chat，实时 yield

@@ -145,3 +145,44 @@ async def release_lock(
         await client.eval(script, 1, _lock_key(user_id, question, conversation_id), token)
     except Exception as e:
         logger.warning(f"Redis 释放锁失败：{e}")
+
+
+# ============ 会话摘要专用锁 ============
+# 与问答互斥锁（_lock_key，按 question hash）分离：摘要生成慢、按 conversation 维度防重复。
+# 场景：同一会话连续多轮都达阈值，多次 BackgroundTasks 触发，靠此锁保证只有一个 worker 真正生成。
+
+def _summary_lock_key(conv_id: int) -> str:
+    return f"summary_lock:conv_{conv_id}"
+
+
+async def acquire_summary_lock(conv_id: int, expire: int = 60) -> str | None:
+    """摘要生成专用互斥锁。成功返回 token，已被占返回 None，Redis 不可用返回 'no-redis'。
+
+    expire=60s：摘要生成含一次 LLM 调用（数秒级），给足余量避免生成中被误判超时释放。
+    """
+    client = await get_redis()
+    if client is None:
+        return "no-redis"
+    token = uuid.uuid4().hex
+    try:
+        ok = await client.set(_summary_lock_key(conv_id), token, nx=True, ex=expire)
+        return token if ok else None
+    except Exception as e:
+        logger.warning(f"Redis 摘要锁加锁失败：{e}")
+        return "no-redis"
+
+
+async def release_summary_lock(conv_id: int, token: str | None) -> None:
+    if not token or token == "no-redis":
+        return
+    client = await get_redis()
+    if client is None:
+        return
+    try:
+        script = (
+            "if redis.call('GET', KEYS[1]) == ARGV[1] then "
+            "return redis.call('DEL', KEYS[1]) else return 0 end"
+        )
+        await client.eval(script, 1, _summary_lock_key(conv_id), token)
+    except Exception as e:
+        logger.warning(f"Redis 摘要锁释放失败：{e}")

@@ -24,6 +24,7 @@ async def init_db() -> None:
         await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at)"))
         # 轻量迁移：为旧库补列
         await _ensure_column(conn, "messages", "reasoning", "TEXT")
+        await _ensure_column(conn, "conversations", "summary", "TEXT")
         await _ensure_column(conn, "documents", "file_hash", "TEXT")
         # status 字段：旧文档视为已完成（UPDATE 兜底 NULL → done）
         await _ensure_column(conn, "documents", "status", "TEXT DEFAULT 'done'")
