@@ -1,5 +1,6 @@
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from app.agent.memory import truncate_by_token_budget
 from app.agent.state import AgentState
 from app.config import get_settings
 from app.services.document_service import get_user_collection
@@ -8,9 +9,6 @@ from app.services.llm_provider import astream_chat, chat
 from app.services.rerank_service import rerank
 
 settings = get_settings()
-
-# 最近 N 轮历史作为上下文传给 LLM（每轮 = user + assistant 两条消息）
-MAX_HISTORY_ROUNDS = 5
 
 
 async def intent_router(state: AgentState) -> AgentState:
@@ -69,8 +67,8 @@ async def rewrite_query(state: AgentState) -> AgentState:
         return state
 
     try:
-        # 把历史拼成对话格式（最多最近 3 轮，够消解指代又省 token）
-        recent = history[-6:]  # 3 轮 = 6 条消息
+        # 把历史拼成对话格式（取改写专用轮数，够消解指代又省 token）
+        recent = history[-settings.rewrite_history_rounds * 2 :]
         dialogue = "\n".join(
             f"{'用户' if h['role'] == 'user' else '助手'}: {h['content'][:200]}"
             for h in recent
@@ -194,9 +192,15 @@ async def retrieve_documents(state: AgentState) -> AgentState:
 
 
 def _history_to_messages(history: list[dict]) -> list:
-    """把 state['history'] 转成 LangChain 消息列表（正序：最旧在前）。"""
+    """把 state['history'] 转成 LangChain 消息列表（正序：最旧在前）。
+
+    先按 token 预算 + 轮数双约束截断（保留最新历史），再转消息。
+    """
+    trimmed = truncate_by_token_budget(
+        history, settings.history_token_budget, settings.max_history_rounds
+    )
     msgs = []
-    for item in history[-MAX_HISTORY_ROUNDS * 2 :]:  # 最多取最近 N 轮
+    for item in trimmed:
         role = item.get("role")
         content = item.get("content", "")
         if role == "user":

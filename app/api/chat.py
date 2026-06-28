@@ -66,7 +66,8 @@ async def ask(
     conversation_id = body.conversation_id
 
     # 取当前会话最近若干轮历史作为多轮上下文（正序：最旧在前）
-    history = await _load_recent_history(user_id, conversation_id, rounds=5)
+    # 实际窗口由节点层按 token 预算 + 轮数截断
+    history = await _load_recent_history(user_id, conversation_id)
 
     # 缓存按会话隔离（key 含 conversation_id）
     hit, cached = await get_cached_answer(user_id, question, conversation_id)
@@ -142,12 +143,18 @@ async def ask(
 
 
 async def _load_recent_history(
-    user_id: int, conversation_id: int | None, rounds: int = 5
+    user_id: int,
+    conversation_id: int | None,
+    rounds: int | None = None,
 ) -> list[dict]:
     """读取指定会话最近 N 轮历史消息，返回正序（最旧在前）。
 
-    用于多轮上下文。conversation_id 为 None 时取全局最近消息（兼容旧调用）。
+    默认取 summarize_round_threshold 轮（比生成窗口更宽），交由节点层按
+    token 预算 + 轮数截断——既满足生成时的窗口控制，也为会话摘要预留
+    看到窗口外老对话的能力。conversation_id 为 None 时取全局最近消息（兼容旧调用）。
     """
+    if rounds is None:
+        rounds = settings.summarize_round_threshold
     try:
         async with async_session_factory() as db:
             stmt = (

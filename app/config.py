@@ -44,6 +44,21 @@ class Settings(BaseSettings):
     # 每用户最大会话数（超出拒绝创建，提示先删除旧会话）
     max_conversations: int = 10
 
+    # ============ 会话记忆 / 历史管理 ============
+    # 生成答案时历史的最大轮数上限（每轮 = user + assistant 两条消息）
+    max_history_rounds: int = 5
+    # query 改写用的历史轮数（指代消解只需近期上下文，比生成窗口小）
+    rewrite_history_rounds: int = 3
+    # 生成时历史的 token 预算上限（仅历史部分，不含 system prompt/文档）
+    # 用 token 预算而非纯条数截断，避免长答案历史撑爆 context
+    history_token_budget: int = 3500
+    # 会话累计轮数达此阈值后异步生成摘要（压缩老对话）
+    summarize_round_threshold: int = 12
+    # 摘要生成的 max_tokens
+    summary_max_tokens: int = 512
+    # 对话历史 Redis 缓存 TTL（秒）
+    history_cache_ttl_seconds: int = 7200
+
     cache_ttl_seconds: int = 1800
     cache_null_ttl_seconds: int = 60
 
