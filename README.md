@@ -18,6 +18,7 @@ FastAPI · LangGraph · ChromaDB · DeepSeek · Redis · BGE-M3
 - [🛠 技术栈](#-技术栈)
 - [📁 项目结构](#-项目结构)
 - [🧩 分块策略](#-分块策略可配置切换)
+- [🧠 会话记忆](#-会话记忆)
 - [🔍 检索与评测](#-检索与评测)
 - [🚀 快速开始](#-快速开始)
 - [📡 API 概览](#-api-概览)
@@ -40,11 +41,13 @@ FastAPI · LangGraph · ChromaDB · DeepSeek · Redis · BGE-M3
 | 💡 **深度思考模式** | DeepSeek thinking 开关，显式控制思考模式启停，推理过程可折叠查看 |
 | ⚡ **SSE 流式输出** | Server-Sent Events 实时打字机效果，推理面板自动展开、答案逐字呈现 |
 | 🧠 **智能降级回答** | 检索低相关/无命中时降级为「文档背景 + 常识」回答，泛化问题（如「怎么改进简历」）不再硬拒绝 |
-| 🔁 **多轮上下文 + query 改写** | 保留会话最近 5 轮历史，检索前 LLM 改写指代词（"它""第三条"→ 完整问题），解决多轮指代检索失效 |
+| 🔁 **多轮上下文 + query 改写** | 保留会话最近若干轮历史（token 预算 + 轮数双约束截断，替代固定条数），检索前 LLM 改写指代词（"它""第三条"→ 完整问题），解决多轮指代检索失效 |
+| 🧠 **长期记忆：会话摘要** | 长对话达阈值轮数后异步压缩老对话成摘要，注入 system prompt（"摘要 + 近期原文"混合上下文，Dify/FastGPT 同款），解决深挖文档时早期上下文丢失 |
 | 🔄 **同名文档更新** | 上传同名文档时弹窗确认（replace_id 显式声明），避免误伤同名不同文档 |
 | 🚀 **GPU 加速** | 自动检测 CUDA，BGE-M3/Reranker 在 GPU 上推理（encode 17 chunks：21.5s → 0.2s）|
 | 🔐 **JWT 认证** | 注册/登录、数据按用户隔离 |
 | 🚀 **Redis 缓存防护 + 限流** | 防穿透（空值缓存）/ 防击穿（SETNX 互斥锁）/ 防雪崩（TTL ±20% 抖动）+ slowapi 令牌桶限流（100/分钟/用户）|
+| ⚡ **历史缓存** | 热点会话历史 Redis 缓存（按会话维度），写消息/删会话时失效，避免每次问答重查 DB |
 | 🚫 **幂等上传** | sha256 文件哈希查重 + 数据库 `(user_id, file_hash)` 唯一约束兜底，防重复提交 |
 | 📃 **游标分页** | 文档列表与对话历史均用 cursor 分页，无深分页性能问题 |
 
@@ -78,6 +81,7 @@ FastAPI · LangGraph · ChromaDB · DeepSeek · Redis · BGE-M3
 │   ├── agent/               # LangGraph 状态图与节点编排
 │   │   ├── graph.py         # 状态图定义（意图判断→改写→检索→生成）
 │   │   ├── nodes.py         # 节点实现（query改写/混合检索/降级分流）
+│   │   ├── memory.py        # 记忆工具（token 估算 + 预算截断 + 摘要注入）
 │   │   └── state.py         # Agent 状态定义
 │   ├── core/                # 安全/缓存/限流/响应/异常/数据库
 │   ├── models/              # SQLAlchemy 模型（user/document/conversation）
@@ -85,6 +89,7 @@ FastAPI · LangGraph · ChromaDB · DeepSeek · Redis · BGE-M3
 │   └── services/            # 业务层：文档/Embedding/Rerank/对话/分块/LLM
 │       ├── chat_service.py  # SSE 流式核心（手动编排节点 + OpenAI SDK 流式）
 │       ├── llm_provider.py  # LLM Provider 层（OpenAI SDK 直连，thinking 开关）
+│       ├── summary_service.py  # 会话摘要（长对话压缩，异步触发 + SETNX 防重）
 │       ├── ragas_embed_adapter.py  # BGE-M3→RAGAS Embeddings 适配器
 │       ├── document_service.py  # 文档解析（MinerU/MarkItDown）+ 异步处理 + MinerU限流
 │       ├── text_splitter.py # 多策略分块（含 html_preserve 表格保护）
@@ -128,6 +133,33 @@ FastAPI · LangGraph · ChromaDB · DeepSeek · Redis · BGE-M3
 - 递归分隔符含 `</table>`，保护中小 HTML 表格不在分块时被切断（MinerU 表格输出为 HTML）
 
 > 实现见 [`app/services/text_splitter.py`](app/services/text_splitter.py)，测试见 [`tests/test_chunking.py`](tests/test_chunking.py)（含 HTML 表格保护测试）。
+
+---
+
+## 🧠 会话记忆
+
+多轮对话的上下文管理，分短期（窗口截断）和长期（会话摘要）两层：
+
+| 层 | 机制 | 解决的问题 |
+|------|------|---------|
+| **短期：窗口截断** | 从最新历史向前累加，受 token 预算（`HISTORY_TOKEN_BUDGET`）+ 轮数（`MAX_HISTORY_ROUNDS`）双约束 | RAG 答案动辄 2-4k token，纯按条数截断会撑爆 context；按 token 控制总量更稳 |
+| **长期：会话摘要** | 累计轮数达阈值（`SUMMARIZE_ROUND_THRESHOLD`）后异步压缩老对话成摘要，注入 system prompt | 深挖一篇文档时，早期问答超窗口后丢失，后续指代无法消解 |
+
+**会话摘要流程**（Dify/FastGPT 同款"摘要 + 近期原文"方案）：
+
+```
+累计轮数 ≥ 阈值（默认12轮）
+  ↓ BackgroundTasks 异步触发（不阻塞用户请求）
+取【窗口外】的老对话（保留近期原文不压缩）
+  ↓ LLM 压缩成要点摘要
+写回 Conversation.summary，下次问答注入 system prompt
+```
+
+- **防重复**：摘要专用 SETNX 锁（按会话 id，60s），避免连续多轮触发重复生成
+- **降级**：LLM 异常 / Redis 不可用都不阻断主流程，只记日志
+- **历史缓存**：热点会话历史 Redis 缓存（按会话维度），写消息/删会话时失效
+
+> 实现见 [`app/agent/memory.py`](app/agent/memory.py) + [`app/services/summary_service.py`](app/services/summary_service.py)，测试见 [`tests/test_memory.py`](tests/test_memory.py) / [`tests/test_summary.py`](tests/test_summary.py)。
 
 ---
 
@@ -215,6 +247,12 @@ RERANK_TOP_K=3
 
 # 会话管理
 MAX_CONVERSATIONS=10
+
+# 会话记忆（历史窗口 / 摘要阈值，可不填用默认值）
+# MAX_HISTORY_ROUNDS=5          # 生成答案时历史的最大轮数
+# HISTORY_TOKEN_BUDGET=3500     # 历史的 token 预算上限（仅历史部分）
+# SUMMARIZE_ROUND_THRESHOLD=12  # 累计轮数达此值触发会话摘要
+# HISTORY_CACHE_TTL_SECONDS=7200 # 历史缓存 TTL（秒）
 ```
 
 > 💡 **深度思考**：前端对话页有"深度思考"开关，开启后通过 DeepSeek `thinking` 模式输出推理过程（可折叠查看）。关闭时显式禁用思考模式（`deepseek-v4-flash` 默认开启思考，需显式 disabled），确保开关真正生效。这是请求级开关，无需配置。
@@ -291,7 +329,7 @@ event: error          data: {"message":"..."}   # 异常
 uv run pytest
 ```
 
-主要覆盖：文档分块（15 用例）、Embedding 维度、认证、缓存、限流、中英混排等。
+主要覆盖：文档分块（15 用例）、Embedding 维度、认证、缓存、限流、会话记忆（token 截断/摘要注入/历史缓存）、query 改写、中英混排等。
 
 ---
 
