@@ -11,8 +11,11 @@ from app.config import get_settings
 from app.core.cache import (
     acquire_lock,
     get_cached_answer,
+    get_history_cache,
+    invalidate_history_cache,
     release_lock,
     set_cached_answer,
+    set_history_cache,
 )
 from app.core.database import async_session_factory, get_db
 from app.core.exceptions import BizError
@@ -158,9 +161,32 @@ async def _load_recent_history(
     默认取 summarize_round_threshold 轮（比生成窗口更宽），交由节点层按
     token 预算 + 轮数截断——既满足生成时的窗口控制，也为会话摘要预留
     看到窗口外老对话的能力。conversation_id 为 None 时取全局最近消息（兼容旧调用）。
+
+    读路径：有 conversation_id 时先查 Redis 历史缓存，miss 再查 DB 回填。
     """
     if rounds is None:
         rounds = settings.summarize_round_threshold
+
+    # 有会话 id：缓存优先（按会话维度缓存）
+    if conversation_id is not None:
+        cached = await get_history_cache(conversation_id)
+        if cached is not None:
+            return cached
+
+    history = await _load_history_from_db(user_id, conversation_id, rounds)
+
+    # 回填缓存（仅会话维度可缓存）
+    if conversation_id is not None and history:
+        await set_history_cache(conversation_id, history)
+    return history
+
+
+async def _load_history_from_db(
+    user_id: int,
+    conversation_id: int | None,
+    rounds: int,
+) -> list[dict]:
+    """从 DB 查询历史消息（缓存未命中时调用）。"""
     try:
         async with async_session_factory() as db:
             stmt = (
@@ -174,12 +200,11 @@ async def _load_recent_history(
                 stmt = stmt.where(Message.conversation_id == conversation_id)
             result = await db.execute(stmt)
             msgs = result.scalars().all()
-        history = [
+        return [
             {"role": m.role, "content": m.content}
             for m in reversed(msgs)
             if m.role in ("user", "assistant") and m.content
         ]
-        return history
     except Exception:
         return []
 
@@ -253,6 +278,8 @@ async def _finalize(
                 )
             )
             await db.commit()
+            # 新消息落地 → 失效历史缓存（避免下次读到不含本次问答的脏历史）
+            await invalidate_history_cache(conv_id)
             # 消息落库后，异步判断是否需要生成/刷新会话摘要（达阈值才真正调 LLM）
             # 放进 BackgroundTasks：用户已收到流式回答，摘要生成不阻塞请求
             if background_tasks is not None:
@@ -373,4 +400,6 @@ async def delete_conversation(
     await db.execute(delete(Message).where(Message.conversation_id == conversation_id))
     await db.delete(conv)
     await db.commit()
+    # 删除会话后清掉历史缓存与摘要锁残留（避免幽灵数据）
+    await invalidate_history_cache(conversation_id)
     return success_response(None, "删除成功")

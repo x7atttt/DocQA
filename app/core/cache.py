@@ -186,3 +186,52 @@ async def release_summary_lock(conv_id: int, token: str | None) -> None:
         await client.eval(script, 1, _summary_lock_key(conv_id), token)
     except Exception as e:
         logger.warning(f"Redis 摘要锁释放失败：{e}")
+
+
+# ============ 对话历史缓存 ============
+# 热点会话每次 ask 都 SELECT 历史较浪费；缓存按 conversation 维度，
+# 写消息后失效（新消息落地 → 缓存作废）。decode_responses=True 故值为 JSON 字符串。
+
+def _history_key(conv_id: int) -> str:
+    return f"history:conv_{conv_id}"
+
+
+async def get_history_cache(conv_id: int) -> list[dict] | None:
+    """读取会话历史缓存。命中返回列表（正序，最旧在前）；未命中/Redis不可用返回 None。"""
+    client = await get_redis()
+    if client is None:
+        return None
+    try:
+        raw = await client.get(_history_key(conv_id))
+        if raw is None:
+            return None
+        return json.loads(raw)
+    except Exception as e:
+        logger.warning(f"Redis 历史缓存读取失败：{e}")
+        return None
+
+
+async def set_history_cache(conv_id: int, history: list[dict]) -> None:
+    """写入会话历史缓存，带 TTL 抖动（防雪崩）。"""
+    client = await get_redis()
+    if client is None:
+        return
+    try:
+        payload = json.dumps(history, ensure_ascii=False)
+        base = settings.history_cache_ttl_seconds
+        jitter = random.randint(-int(base * 0.2), int(base * 0.2))
+        ttl = max(60, base + jitter)
+        await client.set(_history_key(conv_id), payload, ex=ttl)
+    except Exception as e:
+        logger.warning(f"Redis 历史缓存写入失败：{e}")
+
+
+async def invalidate_history_cache(conv_id: int) -> None:
+    """失效会话历史缓存（写消息/删消息后调用，避免脏读）。"""
+    client = await get_redis()
+    if client is None:
+        return
+    try:
+        await client.delete(_history_key(conv_id))
+    except Exception as e:
+        logger.warning(f"Redis 历史缓存失效失败：{e}")
