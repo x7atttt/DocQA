@@ -63,7 +63,8 @@ async def upload(
         )
 
     # 增量更新：用户在前端确认"更新同名文档"后，带 replace_id 重传
-    # replace_id 指定要替换的旧文档，删旧 + 新建（用户显式声明，不靠文件名猜）
+    # 不删旧文档（保留旧 chunks 供 diff），复用旧记录、更新 hash、置 pending
+    pending_doc_id: int
     if replace_id is not None:
         old_doc = await db.execute(
             select(Document).where(Document.id == replace_id, Document.user_id == user.id)
@@ -71,8 +72,12 @@ async def upload(
         old = old_doc.scalar_one_or_none()
         if old is None:
             raise BizError(code=ResponseCode.DOC_NOT_FOUND, message="待更新的文档不存在", http_status=404)
-        # 删旧 chunk + 旧记录，然后正常入库（Document.id 会变，历史 source 是 JSON 快照不受影响）
-        await delete_document(old, db)
+        # 复用旧文档记录：更新 file_hash/size/status，后台增量 diff chunks
+        old.file_hash = file_hash
+        old.file_size = len(content)
+        old.status = "pending"
+        await db.commit()
+        pending_doc_id = old.id
     else:
         # 同名检测：无 replace_id 时，若同名文档存在且内容不同 → 返回冲突，等用户确认
         # （同名≠同文档，不自动覆盖；让用户显式确认，避免误伤同名不同文档）
@@ -91,28 +96,31 @@ async def upload(
                 http_status=409,
                 data={"existing_id": same_doc.id, "filename": same_doc.filename},
             )
+        # 新建 pending 记录
+        document = await create_pending_document(
+            filename=file.filename,
+            ext=ext,
+            file_size=len(content),
+            user_id=user.id,
+            db=db,
+            file_hash=file_hash,
+        )
+        pending_doc_id = document.id
 
     file_path, _ = save_upload_file(content, ext)
-    # C2 异步上传：先建 pending 记录立即返回，后台解析（前端轮询状态 pending→done）
-    # 同事件循环 BackgroundTasks：_chroma_lock / MinerU Semaphore 天然有效
-    document = await create_pending_document(
-        filename=file.filename,
-        ext=ext,
-        file_size=len(content),
-        user_id=user.id,
-        db=db,
-        file_hash=file_hash,
-    )
-    # 后台处理：解析→分块→embedding→入库，独立 session（不复用请求的）
+    # 后台处理：replace_id 时走增量 diff，否则全量入库
     background_tasks.add_task(
         process_pending_document,
-        document_id=document.id,
+        document_id=pending_doc_id,
         file_path=file_path,
         ext=ext,
         user_id=user.id,
+        replace_id=replace_id,
     )
+    # 返回当前文档记录（refresh 拿到最新状态）
+    doc_out = await db.get(Document, pending_doc_id)
     return success_response(
-        DocumentOut.model_validate(document).model_dump(mode="json"),
+        DocumentOut.model_validate(doc_out).model_dump(mode="json"),
         "已接收，后台处理中",
     )
 

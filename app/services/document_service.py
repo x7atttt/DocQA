@@ -258,6 +258,7 @@ async def process_pending_document(
     file_path: str,
     ext: str,
     user_id: int,
+    replace_id: int | None = None,
 ) -> None:
     """后台处理 pending 文档：解析 → 分块 → embedding → 入库 → 更新 status。
 
@@ -266,6 +267,8 @@ async def process_pending_document(
 
     状态流转：pending → processing → done（成功）/ failed（异常，记录错误信息）。
     失败时清理已落盘的文件，status 置 failed，不影响其他文档。
+
+    replace_id 非空时走增量更新：复用旧文档记录（不新建），后台 diff chunks。
     """
     from app.services.text_splitter import split_text
 
@@ -291,18 +294,27 @@ async def process_pending_document(
             if not chunks:
                 raise RuntimeError("分块结果为空")
 
-            embeddings = await encode_texts(chunks)
+            if replace_id is not None:
+                # 增量更新：diff 新旧分块，仅重算变化块
+                stats = await update_document_chunks(doc, chunks, user_id, db)
+                logger.info(
+                    f"文档 {document_id} ({doc.filename}) 增量更新完成，"
+                    f"+{stats['added']} -{stats['removed']} 复用{stats['reused']}"
+                    f"{'（降级全量）' if stats['degraded'] else ''}"
+                )
+            else:
+                # 新建文档：全量 embedding + add
+                embeddings = await encode_texts(chunks)
+                async with _chroma_lock:
+                    collection = get_user_collection(user_id)
+                    ids = [f"{doc.id}_chunk_{i}" for i in range(len(chunks))]
+                    metadatas = _build_chunk_metadata(user_id, doc.id, doc.filename, chunks)
+                    collection.add(ids=ids, documents=chunks, embeddings=embeddings, metadatas=metadatas)
+                doc.chunk_count = len(chunks)
 
-            async with _chroma_lock:
-                collection = get_user_collection(user_id)
-                ids = [f"{doc.id}_chunk_{i}" for i in range(len(chunks))]
-                metadatas = _build_chunk_metadata(user_id, doc.id, doc.filename, chunks)
-                collection.add(ids=ids, documents=chunks, embeddings=embeddings, metadatas=metadatas)
-
-            doc.chunk_count = len(chunks)
             doc.status = "done"
             await db.commit()
-            logger.info(f"文档 {document_id} ({doc.filename}) 处理完成，{len(chunks)} chunks")
+            logger.info(f"文档 {document_id} ({doc.filename}) 处理完成，{doc.chunk_count} chunks")
         except Exception as e:
             logger.warning(f"文档 {document_id} 处理失败: {e}")
             doc.status = "failed"

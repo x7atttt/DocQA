@@ -198,7 +198,10 @@ async def test_upload_same_name_diff_content_returns_conflict(client):
 
 @pytest.mark.asyncio
 async def test_upload_with_replace_id_updates(client):
-    """带 replace_id → 用户已确认更新，删旧 + 新建成功"""
+    """带 replace_id → 增量更新：复用旧文档记录（id 不变），后台 diff chunks。
+
+    v1→v2 内容大改（版本一→版本二）→ 变化率高 → 降级全量重建路径。
+    """
     token = await _register_and_login(client)
 
     content_v1 = "# 版本一\n\n原始内容。" * 50
@@ -217,17 +220,19 @@ async def test_upload_with_replace_id_updates(client):
         files={"file": ("updatable.md", io.BytesIO(content_v2.encode("utf-8")), "text/markdown")},
     )
     assert resp2.status_code == 200, resp2.text
-    new_doc = resp2.json()["data"]
+    updated_doc = resp2.json()["data"]
+    # 增量更新：复用旧文档记录，id 不变（不再删旧建新）
+    assert updated_doc["id"] == old_id
 
-    # 列表里只有 1 个同名文档（旧的被删，新建的入库）
+    # 列表里只有 1 个同名文档（复用旧记录，无新建）
     list_resp = await client.get("/api/documents/list", headers=_auth_header(token))
     docs = [d for d in list_resp.json()["data"]["documents"] if d["filename"] == "updatable.md"]
     assert len(docs) == 1
-    # 等后台处理完成后验证 chunk_count > 0（异步：上传时 pending，chunk_count=0）
-    status = await _wait_document_done(client, token, new_doc["id"], timeout=30)
+    # 等后台处理完成后验证 chunk_count > 0（异步：上传时 pending，chunk_count 是旧值）
+    status = await _wait_document_done(client, token, old_id, timeout=30)
     assert status == "done", f"更新文档处理失败: {status}"
     list_resp2 = await client.get("/api/documents/list", headers=_auth_header(token))
-    updated = next(d for d in list_resp2.json()["data"]["documents"] if d["id"] == new_doc["id"])
+    updated = next(d for d in list_resp2.json()["data"]["documents"] if d["id"] == old_id)
     assert updated["chunk_count"] >= 1
 
 
