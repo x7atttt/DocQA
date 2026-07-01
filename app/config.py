@@ -57,8 +57,11 @@ class Settings(BaseSettings):
     # 生成时历史的 token 预算上限（仅历史部分，不含 system prompt/文档）
     # 用 token 预算而非纯条数截断，避免长答案历史撑爆 context
     history_token_budget: int = 3500
-    # 会话累计轮数达此阈值后异步生成摘要（压缩老对话）
-    summarize_round_threshold: int = 12
+    # 会话累计轮数达此阈值后异步生成摘要（压缩老对话）。
+    # 应略大于 max_history_rounds：窗口外积攒几轮老对话再压缩，避免
+    # 刚掉出窗口就触发（那些轮次还没积累够上下文）。默认 max_history_rounds(5)+3=8。
+    # 两者差距过大（如 12）会出现"窗口外、摘要未触发"的真空区，老对话丢失。
+    summarize_round_threshold: int = 8
     # 摘要生成的 max_tokens
     summary_max_tokens: int = 512
     # 对话历史 Redis 缓存 TTL（秒）

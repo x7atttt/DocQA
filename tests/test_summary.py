@@ -59,7 +59,7 @@ async def test_summary_below_threshold_skips_llm(_db):
     """轮数不足阈值时不调 LLM，summary 保持 None。"""
     from app.services.summary_service import maybe_generate_summary
 
-    conv_id = await _seed_conversation_with_rounds(user_id=9001, rounds=3)  # 远低于默认阈值12
+    conv_id = await _seed_conversation_with_rounds(user_id=9001, rounds=3)  # 低于默认阈值 8
 
     with patch("app.services.summary_service.chat", new_callable=AsyncMock) as mock_chat:
         await maybe_generate_summary(conv_id)
@@ -138,3 +138,34 @@ async def test_summary_llm_exception_does_not_raise(_db):
         await maybe_generate_summary(conv_id)
 
     assert await _get_summary(conv_id) is None
+
+
+@pytest.mark.asyncio
+async def test_no_vacuum_zone_between_window_and_threshold(_db):
+    """验证真空区已消除：默认配置(threshold=8, window=5)下，刚掉出窗口的轮次能被摘要覆盖。
+
+    修复前 threshold=12：第 6~11 轮老对话掉出窗口但摘要未触发 → 丢失（真空区）。
+    修复后 threshold=8：第 6 轮（窗口外刚 1 轮）摘要仍未触发（合理，积攒上下文），
+    第 8 轮触发摘要，窗口外的第 1~3 轮被压缩 → 真空区缩小到可接受范围。
+    """
+    from app.services import summary_service
+    from app.services.summary_service import maybe_generate_summary
+
+    # 用默认配置（不 patch），验证 threshold=8 与 window=5 的衔接
+    # 6 轮：窗口外 1 轮，未达阈值 8 → 不触发（合理，让老对话积攒几轮再压缩）
+    conv_id_6 = await _seed_conversation_with_rounds(user_id=95006, rounds=6)
+    with patch("app.services.summary_service.chat", new_callable=AsyncMock) as mock_chat_6:
+        await maybe_generate_summary(conv_id_6)
+    assert not mock_chat_6.called  # 6 < 8，未触发
+
+    # 8 轮：达阈值 → 触发摘要，窗口外（第 1~3 轮）被压缩
+    conv_id_8 = await _seed_conversation_with_rounds(user_id=95008, rounds=8)
+    with patch(
+        "app.services.summary_service.chat",
+        new_callable=AsyncMock,
+        return_value="会话讨论了加密方案",
+    ):
+        await maybe_generate_summary(conv_id_8)
+    summary = await _get_summary(conv_id_8)
+    assert summary is not None  # 8 轮达阈值，生成了摘要
+    assert "加密" in summary
